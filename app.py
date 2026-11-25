@@ -326,9 +326,19 @@ def write_outstanding_dashboard_sheet(
         top=Side(style="medium", color="1F4E78"),
         bottom=Side(style="medium", color="1F4E78"),
     )
+    kpi_sep_border = Border(
+        left=Side(style="thick", color="FFFFFF"),
+        right=Side(style="thick", color="FFFFFF"),
+        top=Side(style="thin", color="D9D9D9"),
+        bottom=Side(style="thin", color="D9D9D9"),
+    )
 
-    # Top Title Banner (E1:R2)
-    ws.merge_cells("E1:R2")
+    col_start = 5  # Column E
+    last_tbl_idx = col_start + max(len(df.columns) - 1, 11)
+    last_tbl_ltr = get_column_letter(last_tbl_idx)
+
+    # Top Title Banner (exact width of table below: E1 to last_tbl_ltr)
+    ws.merge_cells(f"E1:{last_tbl_ltr}2")
     ws["E1"] = f"  {title} Dashboard"
     ws["E1"].fill = banner_fill
     ws["E1"].font = banner_font
@@ -447,38 +457,42 @@ def write_outstanding_dashboard_sheet(
     day_rng = f"{ds_ref}!${days_ds_ltr}${r_start}:${days_ds_ltr}${r_end}"
     bkt_rng = f"{ds_ref}!${bkt_ds_ltr}${r_start}:${bkt_ds_ltr}${r_end}"
 
-    # ---- 5 DYNAMIC KPI CARDS (Row 4-5) — Pending Invoices at LAST ----
+    # ---- 5 EVENLY ALIGNED KPI CARDS (Spanning E to last_tbl_ltr with clean white borders) ----
     kpi_specs = [
-        ("E", "F", "Total Outstanding (₹)",
+        ("E", "E", "Total Outstanding (₹)",
          f"=SUMIF({flag_rng},1,{amt_rng})",
          "₹#,##0.00", kpi_fill, kpi_val_font),
-        ("H", "I", "46-90 Days Overdue (₹)",
+        ("F", "F", "46-90 Days Overdue (₹)",
          f'=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},"46-90 Days")',
          "₹#,##0.00", kpi_amber_fill, kpi_amber_font),
-        ("K", "L", "90+ Days Overdue (₹)",
+        ("G", "I", "90+ Days Overdue (₹)",
          f'=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},"90+ Days")',
          "₹#,##0.00", kpi_red_fill, kpi_red_font),
-        ("N", "O", "Avg Overdue Days",
+        ("J", "L", "Avg Overdue Days",
          f"=IFERROR(AVERAGEIF({flag_rng},1,{day_rng}),0)",
          '0" Days"', kpi_fill, kpi_val_font),
-        ("Q", "R", "Pending Invoices",
+        ("M", last_tbl_ltr, "Pending Invoices",
          f"=COUNTIF({flag_rng},1)",
          "#,##0", kpi_fill, kpi_val_font),
     ]
-    ws.row_dimensions[4].height = 18
-    ws.row_dimensions[5].height = 24
+    ws.row_dimensions[4].height = 20
+    ws.row_dimensions[5].height = 26
     for c1, c2, lbl, formula, num_fmt, fill_st, val_font in kpi_specs:
-        ws.merge_cells(f"{c1}4:{c2}4")
-        ws.merge_cells(f"{c1}5:{c2}5")
+        if c1 != c2:
+            ws.merge_cells(f"{c1}4:{c2}4")
+            ws.merge_cells(f"{c1}5:{c2}5")
         ws[f"{c1}4"] = lbl
         ws[f"{c1}4"].font = kpi_label_font
         ws[f"{c1}4"].fill = fill_st
         ws[f"{c1}4"].alignment = Alignment(horizontal="center", vertical="center")
+        ws[f"{c1}4"].border = kpi_sep_border
+
         ws[f"{c1}5"] = formula
         ws[f"{c1}5"].font = val_font
         ws[f"{c1}5"].fill = fill_st
         ws[f"{c1}5"].number_format = num_fmt
         ws[f"{c1}5"].alignment = Alignment(horizontal="center", vertical="center")
+        ws[f"{c1}5"].border = kpi_sep_border
 
     # ---- DROPDOWN LISTS ON ds (Cols T, U, V, W, X) ----
     groups_list = ["All"] + sorted(df["Party Group"].dropna().unique().tolist())
@@ -517,7 +531,6 @@ def write_outstanding_dashboard_sheet(
         dv_mode.add(cell_ref)
 
     # ---- LIVE CHART SUMMARIES ON ds (Cols Y to AG) ----
-    # Chart 1 (Y:Z): Overdue Bucket-wise Outstanding
     ds["Y1"] = "Overdue Bucket"
     ds["Z1"] = "Outstanding"
     for i, b_name in enumerate(["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"], start=2):
@@ -525,7 +538,6 @@ def write_outstanding_dashboard_sheet(
         ds[f"Z{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},Y{i})"
         ds[f"Z{i}"].number_format = "#,##0"
 
-    # Chart 2 (AA:AB): Top 10 Parties (Party Group)
     ds["AA1"] = "Party Group"
     ds["AB1"] = "Outstanding"
     top10_groups = (
@@ -540,7 +552,6 @@ def write_outstanding_dashboard_sheet(
         ds[f"AB{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{grp_rng},AA{i})"
         ds[f"AB{i}"].number_format = "#,##0"
 
-    # Chart 3 (AC:AE): Top 10 Pending Branches
     ds["AC1"] = "Branch"
     ds["AD1"] = "Outstanding"
     top10_branches = (
@@ -556,7 +567,6 @@ def write_outstanding_dashboard_sheet(
         ds[f"AD{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{br_rng},AE{i})"
         ds[f"AD{i}"].number_format = "#,##0"
 
-    # Chart 4 (AF:AG): Last Financial Year Pending by Party
     ds["AF1"] = "Party Group"
     ds["AG1"] = f"FY {last_fy} Pending"
     last_fy_df = df[df["Financial Year"] == last_fy]
@@ -572,15 +582,14 @@ def write_outstanding_dashboard_sheet(
         ds[f"AG{i}"] = f'=SUMIFS({amt_rng},{flag_rng},1,{fy_rng},"{last_fy}",{grp_rng},AF{i})'
         ds[f"AG{i}"].number_format = "#,##0"
 
-    # ---- 4 CLEAN, LIVE CHARTS IN 2x2 GRID (1-column compact gap) ----
-    # Row 1 of Charts: E7 & K7
+    # ---- 4 CLEAN, PERFECTLY ALIGNED CHARTS IN 2x2 GRID (E7/I7 & E25/I25) ----
     ch1 = make_clean_bar_chart(
         chart_type="col",
         title="Overdue Bucket-wise Outstanding (₹)",
         data_ref=Reference(ds, min_col=26, min_row=1, max_row=5),
         cats_ref=Reference(ds, min_col=25, min_row=2, max_row=5),
         bar_hex="1F4E78",
-        width=13.5,
+        width=14.0,
         height=8.8,
     )
     ws.add_chart(ch1, "E7")
@@ -593,12 +602,11 @@ def write_outstanding_dashboard_sheet(
             data_ref=Reference(ds, min_col=28, min_row=1, max_row=max_r2),
             cats_ref=Reference(ds, min_col=27, min_row=2, max_row=max_r2),
             bar_hex="0F766E",
-            width=14.5,
+            width=15.5,
             height=8.8,
         )
-        ws.add_chart(ch2, "K7")
+        ws.add_chart(ch2, "I7")
 
-    # Row 2 of Charts: E25 & K25
     if top10_branches:
         max_r3 = 1 + len(top10_branches)
         ch3 = make_clean_bar_chart(
@@ -607,7 +615,7 @@ def write_outstanding_dashboard_sheet(
             data_ref=Reference(ds, min_col=30, min_row=1, max_row=max_r3),
             cats_ref=Reference(ds, min_col=29, min_row=2, max_row=max_r3),
             bar_hex="4338CA",
-            width=13.5,
+            width=14.0,
             height=8.8,
         )
         ws.add_chart(ch3, "E25")
@@ -620,13 +628,12 @@ def write_outstanding_dashboard_sheet(
             data_ref=Reference(ds, min_col=33, min_row=1, max_row=max_r4),
             cats_ref=Reference(ds, min_col=32, min_row=2, max_row=max_r4),
             bar_hex="B91C1C",
-            width=14.5,
+            width=15.5,
             height=8.8,
         )
-        ws.add_chart(ch4, "K25")
+        ws.add_chart(ch4, "I25")
 
     # ---- DYNAMIC FILTERED INVOICES TABLE (Row 43 onwards, Col E onwards) ----
-    col_start = 5
     start_row = 43
 
     for offset, col_name in enumerate(df.columns):
@@ -640,7 +647,6 @@ def write_outstanding_dashboard_sheet(
     date_col_offset = df.columns.get_loc("Invoice Date")
     bkt_tbl_ltr = get_column_letter(col_start + df.columns.get_loc("Overdue Bucket"))
     first_tbl_ltr = get_column_letter(col_start)
-    last_tbl_ltr = get_column_letter(col_start + len(df.columns) - 1)
 
     for r_idx in range(1, n_rows + 1):
         excel_row = start_row + r_idx
@@ -670,9 +676,10 @@ def write_outstanding_dashboard_sheet(
 
     for offset, col_name in enumerate(df.columns):
         c_idx = col_start + offset
-        max_len = max(len(str(col_name)), 12)
+        min_w = 24 if offset == 0 else 12
+        max_len = max(len(str(col_name)), min_w)
         sample_max = df[col_name].astype(str).str.len().max()
-        max_len = min(max(max_len, int(sample_max) + 3), 38)
+        max_len = min(max(max_len, int(sample_max) + 3), 36)
         ws.column_dimensions[get_column_letter(c_idx)].width = max_len
 
 
@@ -770,7 +777,6 @@ def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str, last_f
         k4.metric("Avg Overdue Days", f"{avg_days} Days")
         k5.metric("Pending Invoices", f"{total_bills:,}")
 
-        # 2x2 Charts Grid
         c1, c2 = st.columns(2)
         with c1:
             bucket_order = ["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"]
