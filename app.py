@@ -930,4 +930,3 @@ with tab1:
 
 with tab2:
     render_outstanding_tab(purchase_out, "purchase", "Purchase Outstanding")
-```[cite: 6]
