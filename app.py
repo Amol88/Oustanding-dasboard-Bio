@@ -1,9 +1,6 @@
 import io
 import re
-import zipfile
-import xml.etree.ElementTree as ET
 from datetime import date
-from xml.sax.saxutils import escape as xml_escape
 
 import pandas as pd
 import plotly.express as px
@@ -12,6 +9,7 @@ from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 st.set_page_config(
@@ -188,320 +186,7 @@ def process_register_outstanding(
     return main_clean, out_df
 
 
-# ---------- NATIVE EXCEL SLICER XML INJECTOR (CHART-SAFE) ----------
-
-def inject_excel_table_slicers(xlsx_bytes: bytes, sheet_slicer_configs: list) -> bytes:
-    """
-    Existing Excel Charts (drawing.xml) ko preserve karte hue Sales & Purchase
-    Outstanding sheets mein native clickable Excel Slicers inject karta hai.
-    """
-    in_buf = io.BytesIO(xlsx_bytes)
-    with zipfile.ZipFile(in_buf, "r") as zin:
-        files = {name: zin.read(name) for name in zin.namelist()}
-
-    ns_main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-    ns_r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-    ns_rel = "http://schemas.openxmlformats.org/package/2006/relationships"
-    ns_ct = "http://schemas.openxmlformats.org/package/2006/content-types"
-
-    wb_root = ET.fromstring(files["xl/workbook.xml"])
-    wb_rels_root = ET.fromstring(files["xl/_rels/workbook.xml.rels"])
-    ct_root = ET.fromstring(files["[Content_Types].xml"])
-
-    rid_to_target = {
-        rel.attrib["Id"]: rel.attrib["Target"]
-        for rel in wb_rels_root.findall(f"{{{ns_rel}}}Relationship")
-    }
-    sheet_to_path = {}
-    for sh in wb_root.findall(f".//{{{ns_main}}}sheet"):
-        name = sh.attrib["name"]
-        rid = sh.attrib[f"{{{ns_r}}}id"]
-        target = rid_to_target[rid].lstrip("/")
-        if not target.startswith("xl/"):
-            target = "xl/" + target
-        sheet_to_path[name] = target
-
-    table_info = {}
-    for fname, content in files.items():
-        if fname.startswith("xl/tables/table") and fname.endswith(".xml"):
-            t_root = ET.fromstring(content)
-            t_name = t_root.attrib.get("displayName") or t_root.attrib.get("name")
-            t_id = t_root.attrib["id"]
-            cols = {
-                tc.attrib["name"]: tc.attrib["id"]
-                for tc in t_root.findall(f".//{{{ns_main}}}tableColumn")
-            }
-            table_info[t_name] = (t_id, cols)
-
-    def next_rid(rels_root):
-        max_id = 0
-        for rel in rels_root.findall(f"{{{ns_rel}}}Relationship"):
-            m = re.match(r"rId(\d+)", rel.attrib.get("Id", ""))
-            if m:
-                max_id = max(max_id, int(m.group(1)))
-        return f"rId{max_id + 1}"
-
-    def serialize_with_default_ns(root, default_ns):
-        ET.register_namespace("", default_ns)
-        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
-    cache_counter = 0
-    slicer_part_counter = 0
-    drawing_counter = sum(
-        1 for k in files if k.startswith("xl/drawings/drawing") and k.endswith(".xml")
-    )
-    wb_cache_rids = []
-    ct_overrides = []
-
-    for cfg in sheet_slicer_configs:
-        sh_name = cfg["sheet_name"]
-        t_name = cfg["table_name"]
-        if sh_name not in sheet_to_path or t_name not in table_info:
-            continue
-
-        t_id, col_map = table_info[t_name]
-        sh_path = sheet_to_path[sh_name]
-        sh_dir, sh_file = sh_path.rsplit("/", 1)
-        sh_rels_path = f"{sh_dir}/_rels/{sh_file}.rels"
-
-        if sh_rels_path in files:
-            sh_rels_root = ET.fromstring(files[sh_rels_path])
-        else:
-            sh_rels_root = ET.Element(f"{{{ns_rel}}}Relationships")
-
-        existing_draw_target = None
-        for rel in sh_rels_root.findall(f"{{{ns_rel}}}Relationship"):
-            if rel.attrib.get("Type", "").endswith("/drawing"):
-                existing_draw_target = rel.attrib["Target"]
-                break
-
-        slicer_part_counter += 1
-        slicer_xml_items = []
-        drawing_xml_items = []
-        shape_id = 100
-
-        for sl in cfg["slicers"]:
-            col_name = sl["col_name"]
-            if col_name not in col_map:
-                continue
-            col_id = col_map[col_name]
-            cache_counter += 1
-            shape_id += 1
-
-            safe_slug = re.sub(r"[^A-Za-z0-9_]", "_", f"{t_name}_{col_name}")[:36]
-            cache_name = f"Slicer_{safe_slug}_{cache_counter}"
-            slicer_name = xml_escape(f"{sl['caption']} {slicer_part_counter}_{shape_id}")
-            caption_esc = xml_escape(sl["caption"])
-            col_esc = xml_escape(col_name)
-
-            cache_xml = (
-                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                '<slicerCacheDefinition xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" '
-                'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x" '
-                'xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-                f'name="{cache_name}" sourceName="{col_esc}">'
-                '<extLst>'
-                '<ext uri="{2F2917AC-EB37-4324-AD4E-5DD8C200BD13}" '
-                'xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main">'
-                f'<x15:tableSlicerCache tableId="{t_id}" column="{col_id}"/>'
-                '</ext>'
-                '</extLst>'
-                '</slicerCacheDefinition>'
-            )
-            cache_path = f"xl/slicerCaches/slicerCache{cache_counter}.xml"
-            files[cache_path] = cache_xml.encode("utf-8")
-            ct_overrides.append((f"/{cache_path}", "application/vnd.ms-excel.slicerCache+xml"))
-
-            c_rid = next_rid(wb_rels_root)
-            ET.SubElement(
-                wb_rels_root,
-                f"{{{ns_rel}}}Relationship",
-                {
-                    "Id": c_rid,
-                    "Type": "http://schemas.microsoft.com/office/2007/relationships/slicerCache",
-                    "Target": f"slicerCaches/slicerCache{cache_counter}.xml",
-                },
-            )
-            wb_cache_rids.append(c_rid)
-
-            slicer_xml_items.append(
-                f'<slicer name="{slicer_name}" cache="{cache_name}" caption="{caption_esc}" '
-                'startItem="0" columnCount="1" showCaption="1" style="SlicerStyleLight1" rowHeight="241300"/>'
-            )
-
-            fc, fr, tc, tr = sl["from_col"], sl["from_row"], sl["to_col"], sl["to_row"]
-            drawing_xml_items.append(
-                '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
-                '<mc:Choice xmlns:sle14="http://schemas.microsoft.com/office/drawing/2010/slicer" Requires="sle14">'
-                '<xdr:twoCellAnchor>'
-                f'<xdr:from><xdr:col>{fc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{fr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
-                f'<xdr:to><xdr:col>{tc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{tr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
-                '<xdr:graphicFrame macro="">'
-                '<xdr:nvGraphicFramePr>'
-                f'<xdr:cNvPr id="{shape_id}" name="{slicer_name}"/>'
-                '<xdr:cNvGraphicFramePr/>'
-                '</xdr:nvGraphicFramePr>'
-                '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>'
-                '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2010/slicer">'
-                f'<sle:slicer xmlns:sle="http://schemas.microsoft.com/office/drawing/2010/slicer" name="{slicer_name}"/>'
-                '</a:graphicData></a:graphic>'
-                '</xdr:graphicFrame><xdr:clientData/>'
-                '</xdr:twoCellAnchor>'
-                '</mc:Choice>'
-                '<mc:Fallback>'
-                '<xdr:twoCellAnchor>'
-                f'<xdr:from><xdr:col>{fc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{fr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
-                f'<xdr:to><xdr:col>{tc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{tr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
-                '<xdr:sp macro="" textlink="">'
-                '<xdr:nvSpPr>'
-                f'<xdr:cNvPr id="{shape_id}" name="{slicer_name}"/>'
-                '<xdr:cNvSpPr/>'
-                '</xdr:nvSpPr>'
-                '<xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
-                '</xdr:sp><xdr:clientData/>'
-                '</xdr:twoCellAnchor>'
-                '</mc:Fallback>'
-                '</mc:AlternateContent>'
-            )
-
-        if not slicer_xml_items:
-            continue
-
-        slicer_path = f"xl/slicers/slicer{slicer_part_counter}.xml"
-        files[slicer_path] = (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<slicers xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" '
-            'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x" '
-            'xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            + "".join(slicer_xml_items)
-            + "</slicers>"
-        ).encode("utf-8")
-        ct_overrides.append((f"/{slicer_path}", "application/vnd.ms-excel.slicer+xml"))
-
-        if existing_draw_target:
-            draw_path = existing_draw_target.replace("../", "xl/").lstrip("/")
-            if not draw_path.startswith("xl/"):
-                draw_path = "xl/" + draw_path
-            existing_draw_xml = files[draw_path].decode("utf-8")
-
-            root_tag_end = existing_draw_xml.find(">")
-            root_tag = existing_draw_xml[:root_tag_end]
-            extra_ns = ""
-            if "xmlns:xdr=" not in root_tag:
-                extra_ns += ' xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"'
-            if "xmlns:a=" not in root_tag:
-                extra_ns += ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
-            if extra_ns:
-                existing_draw_xml = root_tag + extra_ns + existing_draw_xml[root_tag_end:]
-
-            if "</xdr:wsDr>" in existing_draw_xml:
-                updated_draw_xml = existing_draw_xml.replace(
-                    "</xdr:wsDr>", "".join(drawing_xml_items) + "</xdr:wsDr>", 1
-                )
-            else:
-                updated_draw_xml = existing_draw_xml.replace(
-                    "</wsDr>", "".join(drawing_xml_items) + "</wsDr>", 1
-                )
-
-            files[draw_path] = updated_draw_xml.encode("utf-8")
-            need_drawing_tag = False
-        else:
-            drawing_counter += 1
-            draw_path = f"xl/drawings/drawing{drawing_counter}.xml"
-            files[draw_path] = (
-                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
-                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-                + "".join(drawing_xml_items)
-                + "</xdr:wsDr>"
-            ).encode("utf-8")
-            ct_overrides.append(
-                (f"/{draw_path}", "application/vnd.openxmlformats-officedocument.drawing+xml")
-            )
-            draw_rid = next_rid(sh_rels_root)
-            ET.SubElement(
-                sh_rels_root,
-                f"{{{ns_rel}}}Relationship",
-                {
-                    "Id": draw_rid,
-                    "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing",
-                    "Target": f"../drawings/drawing{drawing_counter}.xml",
-                },
-            )
-            need_drawing_tag = True
-
-        slicer_rid = next_rid(sh_rels_root)
-        ET.SubElement(
-            sh_rels_root,
-            f"{{{ns_rel}}}Relationship",
-            {
-                "Id": slicer_rid,
-                "Type": "http://schemas.microsoft.com/office/2007/relationships/slicer",
-                "Target": f"../slicers/slicer{slicer_part_counter}.xml",
-            },
-        )
-        files[sh_rels_path] = serialize_with_default_ns(sh_rels_root, ns_rel)
-
-        sh_xml_str = files[sh_path].decode("utf-8")
-        if need_drawing_tag:
-            drawing_tag = (
-                f'<drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
-                f'r:id="{draw_rid}"/>'
-            )
-            if "<tableParts" in sh_xml_str:
-                sh_xml_str = sh_xml_str.replace("<tableParts", drawing_tag + "<tableParts", 1)
-            else:
-                sh_xml_str = sh_xml_str.replace("</worksheet>", drawing_tag + "</worksheet>", 1)
-
-        ext_block = (
-            '<ext uri="{A8765BA9-456A-4dab-B4F3-ACF838C121DE}" '
-            'xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">'
-            '<x14:slicerList>'
-            f'<x14:slicer xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
-            f'r:id="{slicer_rid}"/>'
-            '</x14:slicerList>'
-            '</ext>'
-        )
-        if "</extLst>" in sh_xml_str:
-            sh_xml_str = sh_xml_str.replace("</extLst>", ext_block + "</extLst>", 1)
-        else:
-            sh_xml_str = sh_xml_str.replace("</worksheet>", f"<extLst>{ext_block}</extLst></worksheet>", 1)
-
-        files[sh_path] = sh_xml_str.encode("utf-8")
-
-    if wb_cache_rids:
-        wb_xml_str = files["xl/workbook.xml"].decode("utf-8")
-        cache_refs = "".join(
-            f'<x14:slicerCache xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" '
-            f'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{rid}"/>'
-            for rid in wb_cache_rids
-        )
-        wb_ext = (
-            '<ext uri="{7523E5D3-25F3-45E0-1632-64F254C22452}" '
-            'xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main">'
-            f'<x15:slicerCaches>{cache_refs}</x15:slicerCaches>'
-            '</ext>'
-        )
-        if "</extLst>" in wb_xml_str:
-            wb_xml_str = wb_xml_str.replace("</extLst>", wb_ext + "</extLst>", 1)
-        else:
-            wb_xml_str = wb_xml_str.replace("</workbook>", f"<extLst>{wb_ext}</extLst></workbook>", 1)
-        files["xl/workbook.xml"] = wb_xml_str.encode("utf-8")
-
-    files["xl/_rels/workbook.xml.rels"] = serialize_with_default_ns(wb_rels_root, ns_rel)
-    for part_name, content_type in ct_overrides:
-        ET.SubElement(ct_root, f"{{{ns_ct}}}Override", {"PartName": part_name, "ContentType": content_type})
-    files["[Content_Types].xml"] = serialize_with_default_ns(ct_root, ns_ct)
-
-    out_buf = io.BytesIO()
-    with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zout:
-        for name, data in files.items():
-            zout.writestr(name, data)
-    out_buf.seek(0)
-    return out_buf.getvalue()
-
-
-# ---------- EXCEL GENERATOR (4 SHEETS WITH FULL APP-STYLE DASHBOARDS) ----------
+# ---------- 100% NATIVE, ZERO-ERROR EXCEL DASHBOARD GENERATOR ----------
 
 def write_raw_sheet(wb: Workbook, title: str, df: pd.DataFrame):
     ws = wb.create_sheet(title=title)
@@ -529,14 +214,20 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     start_row = 23  # Table Header Row
     end_row = max(start_row + len(df), start_row + 1)
 
-    ws.column_dimensions["A"].width = 14
-    ws.column_dimensions["B"].width = 14
-    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["A"].width = 3
+    ws.column_dimensions["B"].width = 28
+    ws.column_dimensions["C"].width = 3
     ws.column_dimensions["D"].width = 3
 
+    # Styles
     banner_fill = PatternFill("solid", fgColor="1F4E78")
     banner_font = Font(bold=True, size=15, color="FFFFFF")
-    slicer_hdr_font = Font(bold=True, size=11, color="1F4E78")
+    panel_fill = PatternFill("solid", fgColor="F2F5F9")
+    filter_hdr_fill = PatternFill("solid", fgColor="1F4E78")
+    filter_hdr_font = Font(bold=True, size=11, color="FFFFFF")
+    filter_lbl_font = Font(bold=True, size=9, color="1F4E78")
+    dropdown_fill = PatternFill("solid", fgColor="FFFFFF")
+    dropdown_font = Font(bold=True, size=10, color="000000")
     kpi_label_font = Font(bold=True, size=9, color="595959")
     kpi_val_font = Font(bold=True, size=13, color="1F4E78")
     kpi_red_font = Font(bold=True, size=13, color="C00000")
@@ -552,10 +243,14 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         top=Side(style="thin", color="D9D9D9"),
         bottom=Side(style="thin", color="D9D9D9"),
     )
+    box_border = Border(
+        left=Side(style="medium", color="1F4E78"),
+        right=Side(style="medium", color="1F4E78"),
+        top=Side(style="medium", color="1F4E78"),
+        bottom=Side(style="medium", color="1F4E78"),
+    )
 
-    ws["A2"] = "FILTERS / SLICERS"
-    ws["A2"].font = slicer_hdr_font
-
+    # Top Title Banner (E1:O2)
     ws.merge_cells("E1:O2")
     ws["E1"] = f"  {title} Dashboard"
     ws["E1"].fill = banner_fill
@@ -564,28 +259,84 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     ws.row_dimensions[1].height = 18
     ws.row_dimensions[2].height = 18
 
-    table_cols = list(df.columns) + ["Visible"]
-    first_tbl_ltr = get_column_letter(col_start)
-    party_branch_ltr = get_column_letter(col_start + df.columns.get_loc("Party Name (Branch)"))
-    amt_col_idx = col_start + df.columns.get_loc("Invoice Value")
-    amt_col_ltr = get_column_letter(amt_col_idx)
-    days_col_idx = col_start + df.columns.get_loc("Overdue Days")
-    days_col_ltr = get_column_letter(days_col_idx)
-    bucket_col_idx = col_start + df.columns.get_loc("Overdue Bucket")
-    bucket_col_ltr = get_column_letter(bucket_col_idx)
-    vis_col_idx = col_start + len(df.columns)
-    vis_col_ltr = get_column_letter(vis_col_idx)
+    # Left Filter Panel Background (A1:C21)
+    for r in range(1, 22):
+        for c in range(1, 4):
+            ws.cell(row=r, column=c).fill = panel_fill
 
+    ws["B2"] = "DASHBOARD FILTERS"
+    ws["B2"].fill = filter_hdr_fill
+    ws["B2"].font = filter_hdr_font
+    ws["B2"].alignment = Alignment(horizontal="center", vertical="center")
+
+    ws["B4"] = "1. Party / Company Group"
+    ws["B4"].font = filter_lbl_font
+    ws["B5"] = "All"
+    ws["B5"].fill = dropdown_fill
+    ws["B5"].font = dropdown_font
+    ws["B5"].border = box_border
+    ws["B5"].alignment = Alignment(horizontal="left", vertical="center")
+
+    ws["B7"] = "2. Branch / Sub-Party"
+    ws["B7"].font = filter_lbl_font
+    ws["B8"] = "All"
+    ws["B8"].fill = dropdown_fill
+    ws["B8"].font = dropdown_font
+    ws["B8"].border = box_border
+    ws["B8"].alignment = Alignment(horizontal="left", vertical="center")
+
+    ws["B10"] = "3. Overdue Days Bucket"
+    ws["B10"].font = filter_lbl_font
+    ws["B11"] = "All"
+    ws["B11"].fill = dropdown_fill
+    ws["B11"].font = dropdown_font
+    ws["B11"].border = box_border
+    ws["B11"].alignment = Alignment(horizontal="left", vertical="center")
+
+    ws["B13"] = "Tip: Dropdown change karte hi"
+    ws["B13"].font = Font(italic=True, size=8, color="595959")
+    ws["B14"] = "KPIs & Charts live update honge."
+    ws["B14"].font = Font(italic=True, size=8, color="595959")
+    ws["B16"] = "Table Slicer ke liye:"
+    ws["B16"].font = Font(bold=True, size=8, color="1F4E78")
+    ws["B17"] = "Table par click -> Insert -> Slicer"
+    ws["B17"].font = Font(italic=True, size=8, color="595959")
+
+    # Column Letters for Formulas
+    first_tbl_ltr = get_column_letter(col_start)
+    group_ltr = get_column_letter(col_start + df.columns.get_loc("Party Group"))
+    branch_ltr = get_column_letter(col_start + df.columns.get_loc("Party Name (Branch)"))
+    amt_col_idx = col_start + df.columns.get_loc("Invoice Value")
+    amt_ltr = get_column_letter(amt_col_idx)
+    days_ltr = get_column_letter(col_start + df.columns.get_loc("Overdue Days"))
+    bucket_ltr = get_column_letter(col_start + df.columns.get_loc("Overdue Bucket"))
+
+    r1 = start_row + 1
+    r2 = end_row
+    grp_rng = f"${group_ltr}${r1}:${group_ltr}${r2}"
+    br_rng = f"${branch_ltr}${r1}:${branch_ltr}${r2}"
+    amt_rng = f"${amt_ltr}${r1}:${amt_ltr}${r2}"
+    day_rng = f"${days_ltr}${r1}:${days_ltr}${r2}"
+    bkt_rng = f"${bucket_ltr}${r1}:${bucket_ltr}${r2}"
+
+    c_grp = 'IF($B$5="All","*",$B$5)'
+    c_br = 'IF($B$8="All","*",$B$8)'
+    c_bkt = 'IF($B$11="All","*",$B$11)'
+
+    # 4 Dynamic KPI Cards (Row 4-5)
     kpi_specs = [
         ("E", "F", "Total Outstanding (₹)",
-         f"=SUBTOTAL(9,{amt_col_ltr}{start_row+1}:{amt_col_ltr}{end_row})", "₹#,##0.00", kpi_fill, kpi_val_font),
+         f"=SUMIFS({amt_rng},{grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},{c_bkt})",
+         "₹#,##0.00", kpi_fill, kpi_val_font),
         ("H", "I", "Pending Invoices",
-         f"=SUBTOTAL(3,{first_tbl_ltr}{start_row+1}:{first_tbl_ltr}{end_row})", "#,##0", kpi_fill, kpi_val_font),
+         f"=COUNTIFS({grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},{c_bkt})",
+         "#,##0", kpi_fill, kpi_val_font),
         ("K", "L", "90+ Days Overdue (₹)",
-         f'=SUMIFS({amt_col_ltr}{start_row+1}:{amt_col_ltr}{end_row},{bucket_col_ltr}{start_row+1}:{bucket_col_ltr}{end_row},"90+ Days",{vis_col_ltr}{start_row+1}:{vis_col_ltr}{end_row},1)',
+         f'=IF(OR($B$11="All",$B$11="90+ Days"),SUMIFS({amt_rng},{grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},"90+ Days"),0)',
          "₹#,##0.00", kpi_red_fill, kpi_red_font),
         ("N", "O", "Avg Overdue Days",
-         f"=IFERROR(SUBTOTAL(1,{days_col_ltr}{start_row+1}:{days_col_ltr}{end_row}),0)", '0" Days"', kpi_fill, kpi_val_font),
+         f"=IFERROR(AVERAGEIFS({day_rng},{grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},{c_bkt}),0)",
+         '0" Days"', kpi_fill, kpi_val_font),
     ]
     ws.row_dimensions[4].height = 18
     ws.row_dimensions[5].height = 24
@@ -602,13 +353,15 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         ws[f"{c1}5"].number_format = num_fmt
         ws[f"{c1}5"].alignment = Alignment(horizontal="center", vertical="center")
 
-    for offset, col_name in enumerate(table_cols):
+    # Table Headers (Row 23)
+    for offset, col_name in enumerate(df.columns):
         c_idx = col_start + offset
         cell = ws.cell(row=start_row, column=c_idx, value=col_name)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
+    # Table Data (Row 24 onwards)
     bucket_offset = df.columns.get_loc("Overdue Bucket")
     for r_offset, row in enumerate(df.itertuples(index=False, name=None), start=1):
         r_num = start_row + r_offset
@@ -629,13 +382,8 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
                 cell.fill = red_fill
                 cell.font = red_font
 
-        vis_cell = ws.cell(row=r_num, column=vis_col_idx, value=f"=SUBTOTAL(103,{first_tbl_ltr}{r_num})")
-        vis_cell.border = thin_border
-
-    ws.column_dimensions[vis_col_ltr].hidden = True
-
     if len(df) > 0:
-        last_col_ltr = get_column_letter(col_start + len(table_cols) - 1)
+        last_col_ltr = get_column_letter(col_start + len(df.columns) - 1)
         tab = Table(displayName=table_name, ref=f"{first_tbl_ltr}{start_row}:{last_col_ltr}{end_row}")
         tab.tableStyleInfo = TableStyleInfo(
             name="TableStyleMedium2",
@@ -646,18 +394,43 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         )
         ws.add_table(tab)
 
+        # ---- HIDDEN LISTS FOR DROPDOWNS & LIVE CHARTS (Cols Z to AF) ----
+        # Col AD: Party Group Dropdown List
+        groups_list = ["All"] + sorted(df["Party Group"].dropna().unique().tolist())
+        for idx, g_val in enumerate(groups_list, start=1):
+            ws[f"AD{idx}"] = g_val
+        dv_grp = DataValidation(type="list", formula1=f"=$AD$1:$AD${len(groups_list)}", allow_blank=False)
+        ws.add_data_validation(dv_grp)
+        dv_grp.add("B5")
+
+        # Col AE: Branch Dropdown List
+        branches_list = ["All"] + sorted(df["Party Name (Branch)"].dropna().unique().tolist())
+        for idx, b_val in enumerate(branches_list, start=1):
+            ws[f"AE{idx}"] = b_val
+        dv_br = DataValidation(type="list", formula1=f"=$AE$1:$AE${len(branches_list)}", allow_blank=False)
+        ws.add_data_validation(dv_br)
+        dv_br.add("B8")
+
+        # Col AF: Overdue Bucket Dropdown List
+        buckets_dd = ["All", "0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"]
+        for idx, bk_val in enumerate(buckets_dd, start=1):
+            ws[f"AF{idx}"] = bk_val
+        dv_bkt = DataValidation(type="list", formula1=f"=$AF$1:$AF${len(buckets_dd)}", allow_blank=False)
+        ws.add_data_validation(dv_bkt)
+        dv_bkt.add("B11")
+
+        # Chart 1 Summary (Z1:AA5) — Live linked to B5, B8, B11
         ws["Z1"] = "Overdue Bucket"
         ws["AA1"] = "Outstanding (₹)"
-        buckets = ["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"]
-        for i, b_name in enumerate(buckets, start=2):
+        for i, b_name in enumerate(["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"], start=2):
             ws[f"Z{i}"] = b_name
             ws[f"AA{i}"] = (
-                f'=SUMIFS({amt_col_ltr}{start_row+1}:{amt_col_ltr}{end_row},'
-                f'{bucket_col_ltr}{start_row+1}:{bucket_col_ltr}{end_row},Z{i},'
-                f'{vis_col_ltr}{start_row+1}:{vis_col_ltr}{end_row},1)'
+                f'=IF(OR($B$11="All",$B$11=Z{i}),'
+                f'SUMIFS({amt_rng},{grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},Z{i}),0)'
             )
             ws[f"AA{i}"].number_format = "#,##0"
 
+        # Chart 2 Summary (AB1:AC11) — Live linked to B5, B8, B11
         ws["AB1"] = "Branch"
         ws["AC1"] = "Outstanding (₹)"
         top10_branches = (
@@ -670,29 +443,28 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         for i, br_name in enumerate(top10_branches, start=2):
             ws[f"AB{i}"] = br_name
             ws[f"AC{i}"] = (
-                f'=SUMIFS({amt_col_ltr}{start_row+1}:{amt_col_ltr}{end_row},'
-                f'{party_branch_ltr}{start_row+1}:{party_branch_ltr}{end_row},AB{i},'
-                f'{vis_col_ltr}{start_row+1}:{vis_col_ltr}{end_row},1)'
+                f'=IF(OR($B$8="All",$B$8=AB{i}),'
+                f'SUMIFS({amt_rng},{grp_rng},{c_grp},{br_rng},AB{i},{bkt_rng},{c_bkt}),0)'
             )
             ws[f"AC{i}"].number_format = "#,##0"
 
-        for h_col in ["Z", "AA", "AB", "AC"]:
+        for h_col in ["Z", "AA", "AB", "AC", "AD", "AE", "AF"]:
             ws.column_dimensions[h_col].hidden = True
 
+        # Chart 1: Overdue Bucket-wise Outstanding
         ch1 = BarChart()
         ch1.type = "col"
         ch1.style = 10
         ch1.title = "Overdue Bucket-wise Outstanding (₹)"
         ch1.y_axis.title = "Amount (₹)"
         ch1.legend = None
-        data1 = Reference(ws, min_col=27, min_row=1, max_row=5)
-        cats1 = Reference(ws, min_col=26, min_row=2, max_row=5)
-        ch1.add_data(data1, titles_from_data=True)
-        ch1.set_categories(cats1)
+        ch1.add_data(Reference(ws, min_col=27, min_row=1, max_row=5), titles_from_data=True)
+        ch1.set_categories(Reference(ws, min_col=26, min_row=2, max_row=5))
         ch1.width = 14.5
         ch1.height = 7.5
         ws.add_chart(ch1, "E7")
 
+        # Chart 2: Top 10 Pending Branches
         if top10_branches:
             ch2 = BarChart()
             ch2.type = "bar"
@@ -701,10 +473,8 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
             ch2.x_axis.title = "Amount (₹)"
             ch2.legend = None
             max_r2 = 1 + len(top10_branches)
-            data2 = Reference(ws, min_col=29, min_row=1, max_row=max_r2)
-            cats2 = Reference(ws, min_col=28, min_row=2, max_row=max_r2)
-            ch2.add_data(data2, titles_from_data=True)
-            ch2.set_categories(cats2)
+            ch2.add_data(Reference(ws, min_col=29, min_row=1, max_row=max_r2), titles_from_data=True)
+            ch2.set_categories(Reference(ws, min_col=28, min_row=2, max_row=max_r2))
             ch2.width = 16.5
             ch2.height = 7.5
             ws.add_chart(ch2, "K7")
@@ -732,47 +502,13 @@ def build_excel_workbook(
     write_outstanding_dashboard_sheet(wb, "Sales Outstanding", sales_out, "SalesOutstandingTbl")
     write_outstanding_dashboard_sheet(wb, "Purchase Outstanding", purchase_out, "PurchaseOutstandingTbl")
 
-    raw_buf = io.BytesIO()
-    wb.save(raw_buf)
-
-    default_slicers = [
-        {
-            "col_name": "Party Group",
-            "caption": "1. Party / Company Group",
-            "from_col": 0, "from_row": 3, "to_col": 3, "to_row": 16,
-        },
-        {
-            "col_name": "Party Name (Branch)",
-            "caption": "2. Branches / Sub-Parties",
-            "from_col": 0, "from_row": 17, "to_col": 3, "to_row": 31,
-        },
-        {
-            "col_name": "Overdue Bucket",
-            "caption": "3. Overdue Days",
-            "from_col": 0, "from_row": 32, "to_col": 3, "to_row": 41,
-        },
-    ]
-
-    slicer_configs = []
-    if len(sales_out) > 0:
-        slicer_configs.append({
-            "sheet_name": "Sales Outstanding",
-            "table_name": "SalesOutstandingTbl",
-            "slicers": default_slicers,
-        })
-    if len(purchase_out) > 0:
-        slicer_configs.append({
-            "sheet_name": "Purchase Outstanding",
-            "table_name": "PurchaseOutstandingTbl",
-            "slicers": default_slicers,
-        })
-
-    if slicer_configs:
-        return inject_excel_table_slicers(raw_buf.getvalue(), slicer_configs)
-    return raw_buf.getvalue()
+    out_buf = io.BytesIO()
+    wb.save(out_buf)
+    out_buf.seek(0)
+    return out_buf.getvalue()
 
 
-# ---------- INTERACTIVE DASHBOARD RENDERER ----------
+# ---------- INTERACTIVE STREAMLIT DASHBOARD RENDERER ----------
 
 def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
     if df.empty:
@@ -900,7 +636,7 @@ if not (ml_file and pur_file and sal_file):
     st.info("Left sidebar mein teeno Excel files (Multi Ledger, Purchase, aur Sales) upload karein.")
     st.stop()
 
-with st.spinner("Files process ho rahi hain aur Excel Dashboards + Slicers generate ho rahe hain..."):
+with st.spinner("Files process ho rahi hain aur Excel Dashboards generate ho rahe hain..."):
     ml_df = read_register(ml_file.getvalue())
     pur_df = read_register(pur_file.getvalue())
     sal_df = read_register(sal_file.getvalue())
