@@ -8,9 +8,10 @@ import streamlit as st
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.chart.label import DataLabelList
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.worksheet.datavalidation import DataValidation
 
 st.set_page_config(
     page_title="Outstanding Tracker Dashboard",
@@ -232,7 +233,7 @@ def make_clean_bar_chart(
     return ch
 
 
-# ---------- EXCEL DASHBOARD WITH NATIVE CHECKBOX MULTI-SELECT FILTERS ----------
+# ---------- LEFT-PANEL MULTI-SELECT EXCEL DASHBOARD GENERATOR ----------
 
 def write_raw_sheet(wb: Workbook, title: str, df: pd.DataFrame):
     ws = wb.create_sheet(title=title)
@@ -252,23 +253,30 @@ def write_raw_sheet(wb: Workbook, title: str, df: pd.DataFrame):
     ws.freeze_panes = "A2"
 
 
-def write_outstanding_dashboard_sheet(
-    wb: Workbook,
-    title: str,
-    df: pd.DataFrame,
-    table_name: str,
-    calc_sheet_name: str,
-):
+def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame, data_sheet_name: str):
     ws = wb.create_sheet(title=title)
     ws.views.sheetView[0].showGridLines = False
 
-    # Hidden calc sheet sirf 3 charts ke summary data ke liye
-    cs = wb.create_sheet(title=calc_sheet_name)
-    cs.sheet_state = "hidden"
+    # Hidden backend sheet for dynamic filtering + live charts
+    ds = wb.create_sheet(title=data_sheet_name)
+    ds.sheet_state = "hidden"
+
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions["B"].width = 27
+    ws.column_dimensions["C"].width = 11
+    ws.column_dimensions["D"].width = 3
 
     # Styles
     banner_fill = PatternFill("solid", fgColor="1F4E78")
     banner_font = Font(bold=True, size=15, color="FFFFFF")
+    panel_fill = PatternFill("solid", fgColor="F2F5F9")
+    filter_hdr_fill = PatternFill("solid", fgColor="1F4E78")
+    filter_hdr_font = Font(bold=True, size=11, color="FFFFFF")
+    filter_lbl_font = Font(bold=True, size=9, color="1F4E78")
+    dropdown_fill = PatternFill("solid", fgColor="FFFFFF")
+    dropdown_font = Font(bold=True, size=10, color="000000")
+    mode_fill = PatternFill("solid", fgColor="E2E8F0")
+    mode_font = Font(bold=True, size=9, color="1F4E78")
     kpi_label_font = Font(bold=True, size=9, color="595959")
     kpi_val_font = Font(bold=True, size=13, color="1F4E78")
     kpi_amber_font = Font(bold=True, size=13, color="B45309")
@@ -276,8 +284,6 @@ def write_outstanding_dashboard_sheet(
     kpi_fill = PatternFill("solid", fgColor="EDF2F8")
     kpi_amber_fill = PatternFill("solid", fgColor="FEF3C7")
     kpi_red_fill = PatternFill("solid", fgColor="FCE4D6")
-    tip_fill = PatternFill("solid", fgColor="E8F4FD")
-    tip_font = Font(bold=True, size=9, color="1F4E78")
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(bold=True, color="FFFFFF", size=10)
     amber_fill = PatternFill("solid", fgColor="FEF3C7")
@@ -290,60 +296,146 @@ def write_outstanding_dashboard_sheet(
         top=Side(style="thin", color="D9D9D9"),
         bottom=Side(style="thin", color="D9D9D9"),
     )
+    box_border = Border(
+        left=Side(style="medium", color="1F4E78"),
+        right=Side(style="medium", color="1F4E78"),
+        top=Side(style="medium", color="1F4E78"),
+        bottom=Side(style="medium", color="1F4E78"),
+    )
 
-    n_cols = len(df.columns)
-    last_tbl_ltr = get_column_letter(max(n_cols, 11))
-
-    # Top Title Banner (Row 1-2)
-    ws.merge_cells(f"A1:{last_tbl_ltr}2")
-    ws["A1"] = f"  {title} Dashboard"
-    ws["A1"].fill = banner_fill
-    ws["A1"].font = banner_font
-    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    # Top Title Banner (E1:R2)
+    ws.merge_cells("E1:R2")
+    ws["E1"] = f"  {title} Dashboard"
+    ws["E1"].fill = banner_fill
+    ws["E1"].font = banner_font
+    ws["E1"].alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 18
     ws.row_dimensions[2].height = 18
 
+    # Left Multi-Select Filter Panel Background (A1:C28)
+    for r in range(1, 29):
+        for c in range(1, 4):
+            ws.cell(row=r, column=c).fill = panel_fill
+
+    ws.merge_cells("B2:C2")
+    ws["B2"] = "MULTI-SELECT FILTERS"
+    ws["B2"].fill = filter_hdr_fill
+    ws["B2"].font = filter_hdr_font
+    ws["B2"].alignment = Alignment(horizontal="center", vertical="center")
+
+    def setup_filter_block(header_row: int, label_text: str, slot_rows: list):
+        ws[f"B{header_row}"] = label_text
+        ws[f"B{header_row}"].font = filter_lbl_font
+        ws[f"C{header_row}"] = "Include"
+        ws[f"C{header_row}"].fill = mode_fill
+        ws[f"C{header_row}"].font = mode_font
+        ws[f"C{header_row}"].border = thin_border
+        ws[f"C{header_row}"].alignment = Alignment(horizontal="center", vertical="center")
+
+        for idx, r_num in enumerate(slot_rows):
+            cell = ws[f"B{r_num}"]
+            cell.value = "All" if idx == 0 else None
+            cell.fill = dropdown_fill
+            cell.font = dropdown_font
+            cell.border = box_border
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    # 3 Filter Blocks with 5 Multi-Select Slots + Include/Exclude Mode each
+    setup_filter_block(4, "1. Party / Company Group", [5, 6, 7, 8, 9])
+    setup_filter_block(11, "2. Branch / Sub-Party", [12, 13, 14, 15, 16])
+    setup_filter_block(18, "3. Overdue Days Bucket", [19, 20, 21, 22, 23])
+
+    ws["B25"] = "How to use:"
+    ws["B25"].font = Font(bold=True, size=8, color="1F4E78")
+    ws["B26"] = "• 1 se zyada select karne ke liye"
+    ws["B26"].font = Font(italic=True, size=8, color="595959")
+    ws["B27"] = "  alag boxes mein options chunein."
+    ws["B27"].font = Font(italic=True, size=8, color="595959")
+    ws["B28"] = "• Deselect ke liye 'Exclude' chunein."
+    ws["B28"].font = Font(italic=True, size=8, color="595959")
+
     if len(df) == 0:
-        ws["A4"] = "Koi pending invoice nahi hai."
+        ws["E4"] = "Koi pending invoice nahi hai."
         return
 
-    # Table Layout: Row 26 = Header (with Excel Checkbox AutoFilter!), Row 27+ = Data
-    start_row = 26
-    r1 = start_row + 1
-    r2 = start_row + len(df)
+    # ---- POPULATE BACKEND DATA SHEET (ds) ----
+    # Col A = Match_Flag (1 if row matches all 3 left-panel filters, else 0)
+    # Col B = Match_Counter (cumulative count for live INDEX/MATCH table)
+    # Col C onwards = df columns
+    ds["A1"] = "Match_Flag"
+    ds["B1"] = 0
+    for idx, col_name in enumerate(df.columns, start=3):
+        ds.cell(row=1, column=idx, value=col_name)
 
-    # Helper Visible column (Table ke bahar, hidden) — AutoFilter lagte hi 1 ya 0 hota hai!
-    vis_col_idx = n_cols + 2
-    vis_ltr = get_column_letter(vis_col_idx)
+    grp_ds_ltr = get_column_letter(3 + df.columns.get_loc("Party Group"))
+    br_ds_ltr = get_column_letter(3 + df.columns.get_loc("Party Name (Branch)"))
+    amt_ds_ltr = get_column_letter(3 + df.columns.get_loc("Invoice Value"))
+    days_ds_ltr = get_column_letter(3 + df.columns.get_loc("Overdue Days"))
+    bkt_ds_ltr = get_column_letter(3 + df.columns.get_loc("Overdue Bucket"))
 
-    grp_ltr = get_column_letter(1 + df.columns.get_loc("Party Group"))
-    br_ltr = get_column_letter(1 + df.columns.get_loc("Party Name (Branch)"))
-    amt_idx = 1 + df.columns.get_loc("Invoice Value")
-    amt_ltr = get_column_letter(amt_idx)
-    days_ltr = get_column_letter(1 + df.columns.get_loc("Overdue Days"))
-    bkt_ltr = get_column_letter(1 + df.columns.get_loc("Overdue Bucket"))
+    sh_ref = f"'{title}'"
+    ds_ref = f"'{data_sheet_name}'"
 
-    vis_rng = f"${vis_ltr}${r1}:${vis_ltr}${r2}"
-    amt_rng = f"${amt_ltr}${r1}:${amt_ltr}${r2}"
-    day_rng = f"${days_ltr}${r1}:${days_ltr}${r2}"
-    bkt_rng = f"${bkt_ltr}${r1}:${bkt_ltr}${r2}"
+    n_rows = len(df)
+    r_start = 2
+    r_end = n_rows + 1
+
+    # FIXED Multi-Select Formula:
+    # Agar 5 boxes mein se kisi bhi box mein actual value (non-blank & not "All") hai,
+    # toh "All" automatically ignore ho jayega aur sirf selected values filter hongi!
+    for i, row in enumerate(df.itertuples(index=False, name=None), start=2):
+        cond_grp = (
+            f'IF(COUNTIFS({sh_ref}!$B$5:$B$9,"<>",{sh_ref}!$B$5:$B$9,"<>All")=0,TRUE,'
+            f'IF({sh_ref}!$C$4="Exclude",'
+            f'COUNTIF({sh_ref}!$B$5:$B$9,{grp_ds_ltr}{i})=0,'
+            f'COUNTIF({sh_ref}!$B$5:$B$9,{grp_ds_ltr}{i})>0))'
+        )
+        cond_br = (
+            f'IF(COUNTIFS({sh_ref}!$B$12:$B$16,"<>",{sh_ref}!$B$12:$B$16,"<>All")=0,TRUE,'
+            f'IF({sh_ref}!$C$11="Exclude",'
+            f'COUNTIF({sh_ref}!$B$12:$B$16,{br_ds_ltr}{i})=0,'
+            f'COUNTIF({sh_ref}!$B$12:$B$16,{br_ds_ltr}{i})>0))'
+        )
+        cond_bkt = (
+            f'IF(COUNTIFS({sh_ref}!$B$19:$B$23,"<>",{sh_ref}!$B$19:$B$23,"<>All")=0,TRUE,'
+            f'IF({sh_ref}!$C$18="Exclude",'
+            f'COUNTIF({sh_ref}!$B$19:$B$23,{bkt_ds_ltr}{i})=0,'
+            f'COUNTIF({sh_ref}!$B$19:$B$23,{bkt_ds_ltr}{i})>0))'
+        )
+        ds.cell(row=i, column=1, value=f"=IF(AND({cond_grp},{cond_br},{cond_bkt}),1,0)")
+        ds.cell(row=i, column=2, value=f"=B{i-1}+A{i}")
+
+        for offset, val in enumerate(row):
+            c = ds.cell(row=i, column=3 + offset)
+            if isinstance(val, pd.Timestamp):
+                c.value = val.to_pydatetime() if pd.notna(val) else None
+            else:
+                c.value = None if pd.isna(val) else val
+
+    flag_rng = f"{ds_ref}!$A${r_start}:$A${r_end}"
+    cnt_rng = f"{ds_ref}!$B${r_start}:$B${r_end}"
+    grp_rng = f"{ds_ref}!${grp_ds_ltr}${r_start}:${grp_ds_ltr}${r_end}"
+    br_rng = f"{ds_ref}!${br_ds_ltr}${r_start}:${br_ds_ltr}${r_end}"
+    amt_rng = f"{ds_ref}!${amt_ds_ltr}${r_start}:${amt_ds_ltr}${r_end}"
+    day_rng = f"{ds_ref}!${days_ds_ltr}${r_start}:${days_ds_ltr}${r_end}"
+    bkt_rng = f"{ds_ref}!${bkt_ds_ltr}${r_start}:${bkt_ds_ltr}${r_end}"
 
     # ---- 5 DYNAMIC KPI CARDS (Row 4-5) ----
     kpi_specs = [
-        ("A", "B", "Total Outstanding (₹)",
-         f"=SUMIF({vis_rng},1,{amt_rng})",
+        ("E", "F", "Total Outstanding (₹)",
+         f"=SUMIF({flag_rng},1,{amt_rng})",
          "₹#,##0.00", kpi_fill, kpi_val_font),
-        ("C", "D", "Pending Invoices",
-         f"=COUNTIF({vis_rng},1)",
+        ("H", "I", "Pending Invoices",
+         f"=COUNTIF({flag_rng},1)",
          "#,##0", kpi_fill, kpi_val_font),
-        ("E", "F", "46-90 Days Overdue (₹)",
-         f'=SUMIFS({amt_rng},{vis_rng},1,{bkt_rng},"46-90 Days")',
+        ("K", "L", "46-90 Days Overdue (₹)",
+         f'=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},"46-90 Days")',
          "₹#,##0.00", kpi_amber_fill, kpi_amber_font),
-        ("G", "I", "90+ Days Overdue (₹)",
-         f'=SUMIFS({amt_rng},{vis_rng},1,{bkt_rng},"90+ Days")',
+        ("N", "O", "90+ Days Overdue (₹)",
+         f'=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},"90+ Days")',
          "₹#,##0.00", kpi_red_fill, kpi_red_font),
-        ("J", last_tbl_ltr, "Avg Overdue Days",
-         f"=IFERROR(AVERAGEIF({vis_rng},1,{day_rng}),0)",
+        ("Q", "R", "Avg Overdue Days",
+         f"=IFERROR(AVERAGEIF({flag_rng},1,{day_rng}),0)",
          '0" Days"', kpi_fill, kpi_val_font),
     ]
     ws.row_dimensions[4].height = 18
@@ -361,85 +453,48 @@ def write_outstanding_dashboard_sheet(
         ws[f"{c1}5"].number_format = num_fmt
         ws[f"{c1}5"].alignment = Alignment(horizontal="center", vertical="center")
 
-    # ---- FILTER INSTRUCTION BAR (Row 25, right above Table headers) ----
-    ws.merge_cells(f"A25:{last_tbl_ltr}25")
-    ws["A25"] = (
-        "  FILTER TIP: Niche table ke kisi bhi column header arrow (▼) par click karke "
-        "Party Group, Branch, ya Overdue Bucket mein multiple select / deselect karein — "
-        "upar ke KPIs aur teeno Graphs turant update honge!"
-    )
-    ws["A25"].fill = tip_fill
-    ws["A25"].font = tip_font
-    ws["A25"].alignment = Alignment(horizontal="left", vertical="center")
-    ws.row_dimensions[25].height = 20
+    # ---- DROPDOWN LISTS ON ds (Cols T, U, V, AD) ----
+    groups_list = ["All"] + sorted(df["Party Group"].dropna().unique().tolist())
+    for idx, val in enumerate(groups_list, start=1):
+        ds[f"T{idx}"] = val
+    dv_grp = DataValidation(type="list", formula1=f"={ds_ref}!$T$1:$T${len(groups_list)}", allow_blank=True)
+    ws.add_data_validation(dv_grp)
+    dv_grp.add("B5:B9")
 
-    # ---- TABLE HEADERS (Row 26) ----
-    for c_idx, col_name in enumerate(df.columns, start=1):
-        cell = ws.cell(row=start_row, column=c_idx, value=col_name)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+    branches_list = ["All"] + sorted(df["Party Name (Branch)"].dropna().unique().tolist())
+    for idx, val in enumerate(branches_list, start=1):
+        ds[f"U{idx}"] = val
+    dv_br = DataValidation(type="list", formula1=f"={ds_ref}!$U$1:$U${len(branches_list)}", allow_blank=True)
+    ws.add_data_validation(dv_br)
+    dv_br.add("B12:B16")
 
-    # ---- TABLE DATA (Row 27 onwards) ----
-    bkt_offset = df.columns.get_loc("Overdue Bucket")
-    for r_offset, row in enumerate(df.itertuples(index=False, name=None), start=1):
-        r_num = start_row + r_offset
-        bkt_val = row[bkt_offset]
-        for c_idx, val in enumerate(row, start=1):
-            cell = ws.cell(row=r_num, column=c_idx)
-            if isinstance(val, pd.Timestamp):
-                cell.value = val.to_pydatetime() if pd.notna(val) else None
-                cell.number_format = "dd-mmm-yyyy"
-            else:
-                cell.value = None if pd.isna(val) else val
+    buckets_dd = ["All", "0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"]
+    for idx, val in enumerate(buckets_dd, start=1):
+        ds[f"V{idx}"] = val
+    dv_bkt = DataValidation(type="list", formula1=f"={ds_ref}!$V$1:$V${len(buckets_dd)}", allow_blank=True)
+    ws.add_data_validation(dv_bkt)
+    dv_bkt.add("B19:B23")
 
-            if c_idx == amt_idx:
-                cell.number_format = "#,##0.00"
-            cell.border = thin_border
+    ds["AD1"] = "Include"
+    ds["AD2"] = "Exclude"
+    dv_mode = DataValidation(type="list", formula1=f"={ds_ref}!$AD$1:$AD$2", allow_blank=False)
+    ws.add_data_validation(dv_mode)
+    dv_mode.add("C4")
+    dv_mode.add("C11")
+    dv_mode.add("C18")
 
-            if bkt_val == "90+ Days":
-                cell.fill = red_fill
-                cell.font = red_font
-            elif bkt_val == "46-90 Days":
-                cell.fill = amber_fill
-                cell.font = amber_font
-
-        # Helper Visible Flag (1 when row is visible, 0 when filtered out by checkbox filter)
-        ws.cell(row=r_num, column=vis_col_idx, value=f"=SUBTOTAL(103,A{r_num})")
-
-    ws.column_dimensions[vis_ltr].hidden = True
-
-    # ---- EXCEL TABLE (Enables Search + Select All + Checkboxes on EVERY column!) ----
-    tbl_last_ltr = get_column_letter(n_cols)
-    tab = Table(displayName=table_name, ref=f"A{start_row}:{tbl_last_ltr}{r2}")
-    tab.tableStyleInfo = TableStyleInfo(
-        name="TableStyleMedium2",
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=True,
-        showColumnStripes=False,
-    )
-    ws.add_table(tab)
-
-    # ---- LIVE CHART DATA ON HIDDEN CALC SHEET (cs) ----
-    sh_ref = f"'{title}'"
-    vis_rng_cs = f"{sh_ref}!${vis_ltr}${r1}:${vis_ltr}${r2}"
-    amt_rng_cs = f"{sh_ref}!${amt_ltr}${r1}:${amt_ltr}${r2}"
-    bkt_rng_cs = f"{sh_ref}!${bkt_ltr}${r1}:${bkt_ltr}${r2}"
-    grp_rng_cs = f"{sh_ref}!${grp_ltr}${r1}:${grp_ltr}${r2}"
-    br_rng_cs = f"{sh_ref}!${br_ltr}${r1}:${br_ltr}${r2}"
-
-    # Chart 1 Data (A1:B5): Overdue Bucket-wise Outstanding
-    cs["A1"] = "Overdue Bucket"
-    cs["B1"] = "Outstanding"
+    # ---- LIVE CHART SUMMARIES ON ds ----
+    # Chart 1 Data (W1:X5): Overdue Bucket-wise Outstanding
+    ds["W1"] = "Overdue Bucket"
+    ds["X1"] = "Outstanding"
     for i, b_name in enumerate(["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"], start=2):
-        cs[f"A{i}"] = b_name
-        cs[f"B{i}"] = f"=SUMIFS({amt_rng_cs},{vis_rng_cs},1,{bkt_rng_cs},A{i})"
-        cs[f"B{i}"].number_format = "#,##0"
+        ds[f"W{i}"] = b_name
+        ds[f"X{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},W{i})"
+        ds[f"X{i}"].number_format = "#,##0"
 
-    # Chart 2 Data (D1:E11): Top 10 Parties (Party Group)
-    cs["D1"] = "Party Group"
-    cs["E1"] = "Outstanding"
+    # Chart 2 Data (Y1:Z11): Top 10 Parties (Party Group)
+    ds["Y1"] = "Party Group"
+    ds["Z1"] = "Outstanding"
     top10_groups = (
         df.groupby("Party Group")["Invoice Value"]
         .sum()
@@ -448,13 +503,13 @@ def write_outstanding_dashboard_sheet(
         .index.tolist()
     )
     for i, grp_name in enumerate(top10_groups, start=2):
-        cs[f"D{i}"] = grp_name
-        cs[f"E{i}"] = f"=SUMIFS({amt_rng_cs},{vis_rng_cs},1,{grp_rng_cs},D{i})"
-        cs[f"E{i}"].number_format = "#,##0"
+        ds[f"Y{i}"] = grp_name
+        ds[f"Z{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{grp_rng},Y{i})"
+        ds[f"Z{i}"].number_format = "#,##0"
 
-    # Chart 3 Data (G1:H11): Top 10 Pending Branches (Full name in Col I for exact match)
-    cs["G1"] = "Branch"
-    cs["H1"] = "Outstanding"
+    # Chart 3 Data (AA1:AB11): Top 10 Pending Branches
+    ds["AA1"] = "Branch"
+    ds["AB1"] = "Outstanding"
     top10_branches = (
         df.groupby("Party Name (Branch)")["Invoice Value"]
         .sum()
@@ -463,51 +518,95 @@ def write_outstanding_dashboard_sheet(
         .index.tolist()
     )
     for i, br_name in enumerate(top10_branches, start=2):
-        cs[f"G{i}"] = br_name[:28] + ("..." if len(br_name) > 28 else "")
-        cs[f"I{i}"] = br_name
-        cs[f"H{i}"] = f"=SUMIFS({amt_rng_cs},{vis_rng_cs},1,{br_rng_cs},I{i})"
-        cs[f"H{i}"].number_format = "#,##0"
+        ds[f"AA{i}"] = br_name[:28] + ("..." if len(br_name) > 28 else "")
+        ds[f"AC{i}"] = br_name
+        ds[f"AB{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{br_rng},AC{i})"
+        ds[f"AB{i}"].number_format = "#,##0"
 
-    # ---- 3 CLEAN, LIVE CHARTS (Rows 7 to 23 — ABOVE the Table!) ----
+    # ---- 3 CLEAN, LIVE CHARTS ----
     ch1 = make_clean_bar_chart(
         chart_type="col",
         title="Overdue Bucket-wise Outstanding (₹)",
-        data_ref=Reference(cs, min_col=2, min_row=1, max_row=5),
-        cats_ref=Reference(cs, min_col=1, min_row=2, max_row=5),
+        data_ref=Reference(ds, min_col=24, min_row=1, max_row=5),
+        cats_ref=Reference(ds, min_col=23, min_row=2, max_row=5),
         bar_hex="1F4E78",
-        width=11.5,
-        height=8.6,
+        width=12.0,
+        height=9.2,
     )
-    ws.add_chart(ch1, "A7")
+    ws.add_chart(ch1, "E7")
 
     if top10_groups:
         max_r2 = 1 + len(top10_groups)
         ch2 = make_clean_bar_chart(
             chart_type="bar",
             title="Top 10 Parties by Outstanding (₹)",
-            data_ref=Reference(cs, min_col=5, min_row=1, max_row=max_r2),
-            cats_ref=Reference(cs, min_col=4, min_row=2, max_row=max_r2),
+            data_ref=Reference(ds, min_col=26, min_row=1, max_row=max_r2),
+            cats_ref=Reference(ds, min_col=25, min_row=2, max_row=max_r2),
             bar_hex="0F766E",
-            width=13.0,
-            height=8.6,
+            width=13.5,
+            height=9.2,
         )
-        ws.add_chart(ch2, "E7")
+        ws.add_chart(ch2, "J7")
 
     if top10_branches:
         max_r3 = 1 + len(top10_branches)
         ch3 = make_clean_bar_chart(
             chart_type="bar",
             title="Top 10 Pending Branches (₹)",
-            data_ref=Reference(cs, min_col=8, min_row=1, max_row=max_r3),
-            cats_ref=Reference(cs, min_col=7, min_row=2, max_row=max_r3),
+            data_ref=Reference(ds, min_col=28, min_row=1, max_row=max_r3),
+            cats_ref=Reference(ds, min_col=27, min_row=2, max_row=max_r3),
             bar_hex="4338CA",
-            width=14.0,
-            height=8.6,
+            width=14.5,
+            height=9.2,
         )
-        ws.add_chart(ch3, "I7")
+        ws.add_chart(ch3, "O7")
 
-    # Auto-fit column widths
-    for c_idx, col_name in enumerate(df.columns, start=1):
+    # ---- DYNAMIC FILTERED INVOICES TABLE (Row 26 onwards, Col E onwards) ----
+    col_start = 5
+    start_row = 26
+
+    for offset, col_name in enumerate(df.columns):
+        c_idx = col_start + offset
+        cell = ws.cell(row=start_row, column=c_idx, value=col_name)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    amt_col_offset = df.columns.get_loc("Invoice Value")
+    date_col_offset = df.columns.get_loc("Invoice Date")
+    bkt_tbl_ltr = get_column_letter(col_start + df.columns.get_loc("Overdue Bucket"))
+    first_tbl_ltr = get_column_letter(col_start)
+    last_tbl_ltr = get_column_letter(col_start + len(df.columns) - 1)
+
+    for r_idx in range(1, n_rows + 1):
+        excel_row = start_row + r_idx
+        for offset, col_name in enumerate(df.columns):
+            ds_col_ltr = get_column_letter(3 + offset)
+            c_idx = col_start + offset
+            cell = ws.cell(
+                row=excel_row,
+                column=c_idx,
+                value=f'=IFERROR(INDEX({ds_ref}!${ds_col_ltr}${r_start}:${ds_col_ltr}${r_end},MATCH({r_idx},{cnt_rng},0)),"")',
+            )
+            if offset == amt_col_offset:
+                cell.number_format = "#,##0.00"
+            elif offset == date_col_offset:
+                cell.number_format = "dd-mmm-yyyy"
+            cell.border = thin_border
+
+    # Dynamic Color Highlighting for 90+ Days (Red) & 46-90 Days (Amber)
+    tbl_data_rng = f"{first_tbl_ltr}{start_row + 1}:{last_tbl_ltr}{start_row + n_rows}"
+    ws.conditional_formatting.add(
+        tbl_data_rng,
+        FormulaRule(formula=[f'${bkt_tbl_ltr}{start_row + 1}="90+ Days"'], fill=red_fill, font=red_font),
+    )
+    ws.conditional_formatting.add(
+        tbl_data_rng,
+        FormulaRule(formula=[f'${bkt_tbl_ltr}{start_row + 1}="46-90 Days"'], fill=amber_fill, font=amber_font),
+    )
+
+    for offset, col_name in enumerate(df.columns):
+        c_idx = col_start + offset
         max_len = max(len(str(col_name)), 12)
         sample_max = df[col_name].astype(str).str.len().max()
         max_len = min(max(max_len, int(sample_max) + 3), 38)
@@ -525,12 +624,8 @@ def build_excel_workbook(
 
     write_raw_sheet(wb, "Sales Main Sheet", sales_main)
     write_raw_sheet(wb, "Purchase Main Sheet", purchase_main)
-    write_outstanding_dashboard_sheet(
-        wb, "Sales Outstanding", sales_out, "SalesOutstandingTbl", "_Sales_Calc"
-    )
-    write_outstanding_dashboard_sheet(
-        wb, "Purchase Outstanding", purchase_out, "PurchaseOutstandingTbl", "_Purchase_Calc"
-    )
+    write_outstanding_dashboard_sheet(wb, "Sales Outstanding", sales_out, "_Sales_Data")
+    write_outstanding_dashboard_sheet(wb, "Purchase Outstanding", purchase_out, "_Purchase_Data")
 
     out_buf = io.BytesIO()
     wb.save(out_buf)
