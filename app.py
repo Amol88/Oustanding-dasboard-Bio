@@ -209,12 +209,10 @@ def make_clean_bar_chart(
     ch.add_data(data_ref, titles_from_data=True)
     ch.set_categories(cats_ref)
 
-    # Clean single corporate color
     if ch.series:
         ch.series[0].graphicalProperties.solidFill = bar_hex
         ch.series[0].graphicalProperties.line.solidFill = bar_hex
 
-    # Show ONLY numeric value on bars (no series name, no category name, no legend box)
     dl = DataLabelList()
     dl.showVal = True
     dl.showSerName = False
@@ -223,7 +221,6 @@ def make_clean_bar_chart(
     dl.showLegendKey = False
     ch.dataLabels = dl
 
-    # Clean axes without clutter
     ch.x_axis.delete = False
     ch.y_axis.delete = False
     ch.x_axis.tickLblPos = "low"
@@ -235,7 +232,7 @@ def make_clean_bar_chart(
     return ch
 
 
-# ---------- 100% NATIVE, ZERO-ERROR EXCEL DASHBOARD GENERATOR ----------
+# ---------- 100% NATIVE, MULTI-SELECT EXCEL DASHBOARD GENERATOR ----------
 
 def write_raw_sheet(wb: Workbook, title: str, df: pd.DataFrame):
     ws = wb.create_sheet(title=title)
@@ -307,62 +304,59 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     ws.row_dimensions[1].height = 18
     ws.row_dimensions[2].height = 18
 
-    # Left Filter Panel (A1:C24)
+    # Left Multi-Select Filter Panel (A1:C24)
     for r in range(1, 25):
         for c in range(1, 4):
             ws.cell(row=r, column=c).fill = panel_fill
 
-    ws["B2"] = "DASHBOARD FILTERS"
+    ws["B2"] = "MULTI-SELECT FILTERS"
     ws["B2"].fill = filter_hdr_fill
     ws["B2"].font = filter_hdr_font
     ws["B2"].alignment = Alignment(horizontal="center", vertical="center")
 
-    ws["B4"] = "1. Party / Company Group"
-    ws["B4"].font = filter_lbl_font
-    ws["B5"] = "All"
-    ws["B5"].fill = dropdown_fill
-    ws["B5"].font = dropdown_font
-    ws["B5"].border = box_border
-    ws["B5"].alignment = Alignment(horizontal="left", vertical="center")
+    def style_filter_slots(header_row: int, label_text: str, slot_rows: list):
+        ws[f"B{header_row}"] = label_text
+        ws[f"B{header_row}"].font = filter_lbl_font
+        for idx, r_num in enumerate(slot_rows):
+            cell = ws[f"B{r_num}"]
+            cell.value = "All" if idx == 0 else None
+            cell.fill = dropdown_fill
+            cell.font = dropdown_font
+            cell.border = box_border
+            cell.alignment = Alignment(horizontal="left", vertical="center")
 
-    ws["B7"] = "2. Branch / Sub-Party"
-    ws["B7"].font = filter_lbl_font
-    ws["B8"] = "All"
-    ws["B8"].fill = dropdown_fill
-    ws["B8"].font = dropdown_font
-    ws["B8"].border = box_border
-    ws["B8"].alignment = Alignment(horizontal="left", vertical="center")
+    # 3 Multi-Select Slots each for Party Group, Branch, and Overdue Bucket
+    style_filter_slots(4, "1. Party / Company Group (Up to 3)", [5, 6, 7])
+    style_filter_slots(9, "2. Branch / Sub-Party (Up to 3)", [10, 11, 12])
+    style_filter_slots(14, "3. Overdue Days Bucket (Up to 3)", [15, 16, 17])
 
-    ws["B10"] = "3. Overdue Days Bucket"
-    ws["B10"].font = filter_lbl_font
-    ws["B11"] = "All"
-    ws["B11"].fill = dropdown_fill
-    ws["B11"].font = dropdown_font
-    ws["B11"].border = box_border
-    ws["B11"].alignment = Alignment(horizontal="left", vertical="center")
-
-    ws["B13"] = "Dropdown change karte hi"
-    ws["B13"].font = Font(italic=True, size=8, color="595959")
-    ws["B14"] = "KPIs, Charts & Niche Table"
-    ws["B14"].font = Font(italic=True, size=8, color="595959")
-    ws["B15"] = "sab live update honge!"
-    ws["B15"].font = Font(italic=True, size=8, color="595959")
+    ws["B19"] = "Multi-Select Tip:"
+    ws["B19"].font = Font(bold=True, size=8, color="1F4E78")
+    ws["B20"] = "2+ select karne ke liye 1st box mein"
+    ws["B20"].font = Font(italic=True, size=8, color="595959")
+    ws["B21"] = "1st option aur 2nd box mein 2nd"
+    ws["B21"].font = Font(italic=True, size=8, color="595959")
+    ws["B22"] = "option chunein (All = sab dikhega)."
+    ws["B22"].font = Font(italic=True, size=8, color="595959")
 
     if len(df) == 0:
         ws["E4"] = "Koi pending invoice nahi hai."
         return
 
     # ---- POPULATE BACKEND DATA SHEET (ds) ----
-    ds["A1"] = 0
-    for idx, col_name in enumerate(df.columns, start=2):
+    # Col A = Match_Flag (1 if row matches all 3 multi-select filters, else 0)
+    # Col B = Match_Counter (cumulative sum of Match_Flag for O(N) INDEX/MATCH)
+    # Col C onwards = df columns
+    ds["A1"] = "Match_Flag"
+    ds["B1"] = 0
+    for idx, col_name in enumerate(df.columns, start=3):
         ds.cell(row=1, column=idx, value=col_name)
 
-    grp_ds_ltr = get_column_letter(2 + df.columns.get_loc("Party Group"))
-    br_ds_ltr = get_column_letter(2 + df.columns.get_loc("Party Name (Branch)"))
-    amt_ds_idx = 2 + df.columns.get_loc("Invoice Value")
-    amt_ds_ltr = get_column_letter(amt_ds_idx)
-    days_ds_ltr = get_column_letter(2 + df.columns.get_loc("Overdue Days"))
-    bkt_ds_ltr = get_column_letter(2 + df.columns.get_loc("Overdue Bucket"))
+    grp_ds_ltr = get_column_letter(3 + df.columns.get_loc("Party Group"))
+    br_ds_ltr = get_column_letter(3 + df.columns.get_loc("Party Name (Branch)"))
+    amt_ds_ltr = get_column_letter(3 + df.columns.get_loc("Invoice Value"))
+    days_ds_ltr = get_column_letter(3 + df.columns.get_loc("Overdue Days"))
+    bkt_ds_ltr = get_column_letter(3 + df.columns.get_loc("Overdue Bucket"))
 
     sh_ref = f"'{title}'"
     ds_ref = f"'{data_sheet_name}'"
@@ -372,51 +366,50 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     r_end = n_rows + 1
 
     for i, row in enumerate(df.itertuples(index=False, name=None), start=2):
+        # Multi-select Match_Flag formula (works in ALL Excel versions!)
         ds.cell(
             row=i,
             column=1,
             value=(
                 f'=IF(AND('
-                f'OR({sh_ref}!$B$5="All",{grp_ds_ltr}{i}={sh_ref}!$B$5),'
-                f'OR({sh_ref}!$B$8="All",{br_ds_ltr}{i}={sh_ref}!$B$8),'
-                f'OR({sh_ref}!$B$11="All",{bkt_ds_ltr}{i}={sh_ref}!$B$11)'
-                f'),A{i-1}+1,A{i-1})'
+                f'OR(COUNTIF({sh_ref}!$B$5:$B$7,"All")>0,COUNTA({sh_ref}!$B$5:$B$7)=0,COUNTIF({sh_ref}!$B$5:$B$7,{grp_ds_ltr}{i})>0),'
+                f'OR(COUNTIF({sh_ref}!$B$10:$B$12,"All")>0,COUNTA({sh_ref}!$B$10:$B$12)=0,COUNTIF({sh_ref}!$B$10:$B$12,{br_ds_ltr}{i})>0),'
+                f'OR(COUNTIF({sh_ref}!$B$15:$B$17,"All")>0,COUNTA({sh_ref}!$B$15:$B$17)=0,COUNTIF({sh_ref}!$B$15:$B$17,{bkt_ds_ltr}{i})>0)'
+                f'),1,0)'
             ),
         )
+        ds.cell(row=i, column=2, value=f"=B{i-1}+A{i}")
         for offset, val in enumerate(row):
-            c = ds.cell(row=i, column=2 + offset)
+            c = ds.cell(row=i, column=3 + offset)
             if isinstance(val, pd.Timestamp):
                 c.value = val.to_pydatetime() if pd.notna(val) else None
             else:
                 c.value = None if pd.isna(val) else val
 
+    flag_rng = f"{ds_ref}!$A${r_start}:$A${r_end}"
+    cnt_rng = f"{ds_ref}!$B${r_start}:$B${r_end}"
     grp_rng = f"{ds_ref}!${grp_ds_ltr}${r_start}:${grp_ds_ltr}${r_end}"
     br_rng = f"{ds_ref}!${br_ds_ltr}${r_start}:${br_ds_ltr}${r_end}"
     amt_rng = f"{ds_ref}!${amt_ds_ltr}${r_start}:${amt_ds_ltr}${r_end}"
     day_rng = f"{ds_ref}!${days_ds_ltr}${r_start}:${days_ds_ltr}${r_end}"
     bkt_rng = f"{ds_ref}!${bkt_ds_ltr}${r_start}:${bkt_ds_ltr}${r_end}"
-    cnt_rng = f"{ds_ref}!$A${r_start}:$A${r_end}"
 
-    c_grp = 'IF($B$5="All","*",$B$5)'
-    c_br = 'IF($B$8="All","*",$B$8)'
-    c_bkt = 'IF($B$11="All","*",$B$11)'
-
-    # ---- 5 DYNAMIC KPI CARDS (Row 4-5) ----
+    # ---- 5 DYNAMIC KPI CARDS (Row 4-5) — Linked to Match_Flag ----
     kpi_specs = [
         ("E", "F", "Total Outstanding (₹)",
-         f"=SUMIFS({amt_rng},{grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},{c_bkt})",
+         f"=SUMIF({flag_rng},1,{amt_rng})",
          "₹#,##0.00", kpi_fill, kpi_val_font),
         ("H", "I", "Pending Invoices",
-         f"=COUNTIFS({grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},{c_bkt})",
+         f"=COUNTIF({flag_rng},1)",
          "#,##0", kpi_fill, kpi_val_font),
         ("K", "L", "46-90 Days Overdue (₹)",
-         f'=IF(OR($B$11="All",$B$11="46-90 Days"),SUMIFS({amt_rng},{grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},"46-90 Days"),0)',
+         f'=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},"46-90 Days")',
          "₹#,##0.00", kpi_amber_fill, kpi_amber_font),
         ("N", "O", "90+ Days Overdue (₹)",
-         f'=IF(OR($B$11="All",$B$11="90+ Days"),SUMIFS({amt_rng},{grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},"90+ Days"),0)',
+         f'=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},"90+ Days")',
          "₹#,##0.00", kpi_red_fill, kpi_red_font),
         ("Q", "R", "Avg Overdue Days",
-         f"=IFERROR(AVERAGEIFS({day_rng},{grp_rng},{c_grp},{br_rng},{c_br},{bkt_rng},{c_bkt}),0)",
+         f"=IFERROR(AVERAGEIF({flag_rng},1,{day_rng}),0)",
          '0" Days"', kpi_fill, kpi_val_font),
     ]
     ws.row_dimensions[4].height = 18
@@ -434,41 +427,34 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         ws[f"{c1}5"].number_format = num_fmt
         ws[f"{c1}5"].alignment = Alignment(horizontal="center", vertical="center")
 
-    # ---- DROPDOWN LISTS & CHART SUMMARIES ON ds ----
+    # ---- DROPDOWN LISTS & LIVE CHART SUMMARIES ON ds ----
     groups_list = ["All"] + sorted(df["Party Group"].dropna().unique().tolist())
     for idx, val in enumerate(groups_list, start=1):
         ds[f"T{idx}"] = val
-    dv_grp = DataValidation(type="list", formula1=f"={ds_ref}!$T$1:$T${len(groups_list)}", allow_blank=False)
+    dv_grp = DataValidation(type="list", formula1=f"={ds_ref}!$T$1:$T${len(groups_list)}", allow_blank=True)
     ws.add_data_validation(dv_grp)
-    dv_grp.add("B5")
+    dv_grp.add("B5:B7")
 
     branches_list = ["All"] + sorted(df["Party Name (Branch)"].dropna().unique().tolist())
     for idx, val in enumerate(branches_list, start=1):
         ds[f"U{idx}"] = val
-    dv_br = DataValidation(type="list", formula1=f"={ds_ref}!$U$1:$U${len(branches_list)}", allow_blank=False)
+    dv_br = DataValidation(type="list", formula1=f"={ds_ref}!$U$1:$U${len(branches_list)}", allow_blank=True)
     ws.add_data_validation(dv_br)
-    dv_br.add("B8")
+    dv_br.add("B10:B12")
 
     buckets_dd = ["All", "0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"]
     for idx, val in enumerate(buckets_dd, start=1):
         ds[f"V{idx}"] = val
-    dv_bkt = DataValidation(type="list", formula1=f"={ds_ref}!$V$1:$V${len(buckets_dd)}", allow_blank=False)
+    dv_bkt = DataValidation(type="list", formula1=f"={ds_ref}!$V$1:$V${len(buckets_dd)}", allow_blank=True)
     ws.add_data_validation(dv_bkt)
-    dv_bkt.add("B11")
-
-    c_grp_ds = f'IF({sh_ref}!$B$5="All","*",{sh_ref}!$B$5)'
-    c_br_ds = f'IF({sh_ref}!$B$8="All","*",{sh_ref}!$B$8)'
-    c_bkt_ds = f'IF({sh_ref}!$B$11="All","*",{sh_ref}!$B$11)'
+    dv_bkt.add("B15:B17")
 
     # Chart 1 Data (W1:X5): Overdue Bucket-wise Outstanding
     ds["W1"] = "Overdue Bucket"
     ds["X1"] = "Outstanding"
     for i, b_name in enumerate(["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"], start=2):
         ds[f"W{i}"] = b_name
-        ds[f"X{i}"] = (
-            f'=IF(OR({sh_ref}!$B$11="All",{sh_ref}!$B$11=W{i}),'
-            f'SUMIFS({amt_rng},{grp_rng},{c_grp_ds},{br_rng},{c_br_ds},{bkt_rng},W{i}),0)'
-        )
+        ds[f"X{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},W{i})"
         ds[f"X{i}"].number_format = "#,##0"
 
     # Chart 2 Data (Y1:Z11): Top 10 Parties (Party Group)
@@ -483,10 +469,7 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     )
     for i, grp_name in enumerate(top10_groups, start=2):
         ds[f"Y{i}"] = grp_name
-        ds[f"Z{i}"] = (
-            f'=IF(OR({sh_ref}!$B$5="All",{sh_ref}!$B$5=Y{i}),'
-            f'SUMIFS({amt_rng},{grp_rng},Y{i},{br_rng},{c_br_ds},{bkt_rng},{c_bkt_ds}),0)'
-        )
+        ds[f"Z{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{grp_rng},Y{i})"
         ds[f"Z{i}"].number_format = "#,##0"
 
     # Chart 3 Data (AA1:AB11): Top 10 Pending Branches
@@ -501,11 +484,8 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     )
     for i, br_name in enumerate(top10_branches, start=2):
         ds[f"AA{i}"] = br_name[:28] + ("..." if len(br_name) > 28 else "")
-        ds[f"AC{i}"] = br_name  # Full name for exact SUMIFS matching
-        ds[f"AB{i}"] = (
-            f'=IF(OR({sh_ref}!$B$8="All",{sh_ref}!$B$8=AC{i}),'
-            f'SUMIFS({amt_rng},{grp_rng},{c_grp_ds},{br_rng},AC{i},{bkt_rng},{c_bkt_ds}),0)'
-        )
+        ds[f"AC{i}"] = br_name
+        ds[f"AB{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{br_rng},AC{i})"
         ds[f"AB{i}"].number_format = "#,##0"
 
     # ---- 3 CLEAN, NON-OVERLAPPING LIVE CHARTS ----
@@ -547,8 +527,8 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         ws.add_chart(ch3, "O7")
 
     # ---- DYNAMIC FILTERED INVOICES TABLE (Row 26 onwards, Col E onwards) ----
-    col_start = 5   # Column E
-    start_row = 26  # Header row (clean gap below taller charts)
+    col_start = 5
+    start_row = 26
 
     for offset, col_name in enumerate(df.columns):
         c_idx = col_start + offset
@@ -563,7 +543,7 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     for r_idx in range(1, n_rows + 1):
         excel_row = start_row + r_idx
         for offset, col_name in enumerate(df.columns):
-            ds_col_ltr = get_column_letter(2 + offset)
+            ds_col_ltr = get_column_letter(3 + offset)
             c_idx = col_start + offset
             cell = ws.cell(
                 row=excel_row,
@@ -604,7 +584,7 @@ def build_excel_workbook(
     return out_buf.getvalue()
 
 
-# ---------- INTERACTIVE STREAMLIT DASHBOARD RENDERER ----------
+# ---------- INTERACTIVE STREAMLIT DASHBOARD RENDERER (MULTI-SELECT) ----------
 
 def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
     if df.empty:
@@ -614,36 +594,43 @@ def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
     slicer_col, main_col = st.columns([1.2, 3.8], gap="large")
 
     with slicer_col:
-        st.markdown("### 🎛️ Slicers")
+        st.markdown("### 🎛️ Multi-Select Slicers")
 
         all_groups = sorted(df["Party Group"].dropna().unique().tolist())
-        selected_group = st.selectbox(
-            "1. Party / Company Group",
-            options=["All"] + all_groups,
-            key=f"{key_prefix}_group",
-            help="Company select karte hi uski saari branches select ho jayengi.",
+        selected_groups = st.multiselect(
+            "1. Party / Company Group (Khali = All)",
+            options=all_groups,
+            default=[],
+            key=f"{key_prefix}_groups",
+            help="Ek ya zyada companies select karein. Khali chhodne par sab dikhega.",
         )
 
-        group_df = df if selected_group == "All" else df[df["Party Group"] == selected_group]
+        group_df = df if not selected_groups else df[df["Party Group"].isin(selected_groups)]
 
         available_branches = sorted(group_df["Party Name (Branch)"].dropna().unique().tolist())
+        default_branches = available_branches if selected_groups else []
         selected_branches = st.multiselect(
-            "2. Branches / Sub-Parties (Deselect allowed)",
+            "2. Branches / Sub-Parties (Khali = All)",
             options=available_branches,
-            default=available_branches,
-            key=f"{key_prefix}_branches_{selected_group}",
+            default=default_branches,
+            key=f"{key_prefix}_branches_{'_'.join(selected_groups)}",
+            help="Company select karte hi uski branches aa jayengi; aap kisi ko bhi deselect kar sakte hain.",
         )
 
-        bucket_options = ["All", "0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"]
-        selected_bucket = st.radio(
-            "3. Overdue Days",
+        bucket_options = ["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"]
+        selected_buckets = st.multiselect(
+            "3. Overdue Days Bucket (Khali = All)",
             options=bucket_options,
-            key=f"{key_prefix}_bucket",
+            default=[],
+            key=f"{key_prefix}_buckets",
+            help="Ek ya zyada overdue ranges select karein (e.g. 46-90 Days + 90+ Days).",
         )
 
-    filtered = group_df[group_df["Party Name (Branch)"].isin(selected_branches)].copy()
-    if selected_bucket != "All":
-        filtered = filtered[filtered["Overdue Bucket"] == selected_bucket]
+    filtered = group_df.copy()
+    if selected_branches:
+        filtered = filtered[filtered["Party Name (Branch)"].isin(selected_branches)]
+    if selected_buckets:
+        filtered = filtered[filtered["Overdue Bucket"].isin(selected_buckets)]
 
     with main_col:
         total_amt = filtered["Invoice Value"].sum()
