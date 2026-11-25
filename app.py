@@ -186,6 +186,55 @@ def process_register_outstanding(
     return main_clean, out_df
 
 
+# ---------- CLEAN EXCEL CHART HELPER ----------
+
+def make_clean_bar_chart(
+    chart_type: str,
+    title: str,
+    data_ref: Reference,
+    cats_ref: Reference,
+    bar_hex: str,
+    width: float,
+    height: float,
+) -> BarChart:
+    ch = BarChart()
+    ch.type = chart_type
+    ch.grouping = "clustered"
+    ch.title = title
+    ch.title.overlay = False
+    ch.legend = None
+    ch.plot_vis_only = False
+    ch.varyColors = False
+
+    ch.add_data(data_ref, titles_from_data=True)
+    ch.set_categories(cats_ref)
+
+    # Clean single corporate color
+    if ch.series:
+        ch.series[0].graphicalProperties.solidFill = bar_hex
+        ch.series[0].graphicalProperties.line.solidFill = bar_hex
+
+    # Show ONLY numeric value on bars (no series name, no category name, no legend box)
+    dl = DataLabelList()
+    dl.showVal = True
+    dl.showSerName = False
+    dl.showCatName = False
+    dl.showPercent = False
+    dl.showLegendKey = False
+    ch.dataLabels = dl
+
+    # Clean axes without clutter
+    ch.x_axis.delete = False
+    ch.y_axis.delete = False
+    ch.x_axis.tickLblPos = "low"
+    ch.y_axis.majorGridlines = None
+    ch.x_axis.majorGridlines = None
+
+    ch.width = width
+    ch.height = height
+    return ch
+
+
 # ---------- 100% NATIVE, ZERO-ERROR EXCEL DASHBOARD GENERATOR ----------
 
 def write_raw_sheet(wb: Workbook, title: str, df: pd.DataFrame):
@@ -210,7 +259,6 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     ws = wb.create_sheet(title=title)
     ws.views.sheetView[0].showGridLines = False
 
-    # Hidden backend data sheet for live filtering + live charts
     ds = wb.create_sheet(title=data_sheet_name)
     ds.sheet_state = "hidden"
 
@@ -259,8 +307,8 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     ws.row_dimensions[1].height = 18
     ws.row_dimensions[2].height = 18
 
-    # Left Filter Panel (A1:C21)
-    for r in range(1, 22):
+    # Left Filter Panel (A1:C24)
+    for r in range(1, 25):
         for c in range(1, 4):
             ws.cell(row=r, column=c).fill = panel_fill
 
@@ -305,8 +353,6 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         return
 
     # ---- POPULATE BACKEND DATA SHEET (ds) ----
-    # Col A = Match_Counter (0 in A1, cumulative count of matching rows from A2 onwards)
-    # Col B onwards = df columns
     ds["A1"] = 0
     for idx, col_name in enumerate(df.columns, start=2):
         ds.cell(row=1, column=idx, value=col_name)
@@ -326,7 +372,6 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     r_end = n_rows + 1
 
     for i, row in enumerate(df.itertuples(index=False, name=None), start=2):
-        # Cumulative match counter (O(N), works in ALL Excel versions without array formulas!)
         ds.cell(
             row=i,
             column=1,
@@ -345,7 +390,6 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
             else:
                 c.value = None if pd.isna(val) else val
 
-    # Ranges on ds
     grp_rng = f"{ds_ref}!${grp_ds_ltr}${r_start}:${grp_ds_ltr}${r_end}"
     br_rng = f"{ds_ref}!${br_ds_ltr}${r_start}:${br_ds_ltr}${r_end}"
     amt_rng = f"{ds_ref}!${amt_ds_ltr}${r_start}:${amt_ds_ltr}${r_end}"
@@ -390,8 +434,7 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         ws[f"{c1}5"].number_format = num_fmt
         ws[f"{c1}5"].alignment = Alignment(horizontal="center", vertical="center")
 
-    # ---- DROPDOWN LISTS & CHART SUMMARIES ON ds (Cols T to AA) ----
-    # Col T: Party Group Dropdown
+    # ---- DROPDOWN LISTS & CHART SUMMARIES ON ds ----
     groups_list = ["All"] + sorted(df["Party Group"].dropna().unique().tolist())
     for idx, val in enumerate(groups_list, start=1):
         ds[f"T{idx}"] = val
@@ -399,7 +442,6 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     ws.add_data_validation(dv_grp)
     dv_grp.add("B5")
 
-    # Col U: Branch Dropdown
     branches_list = ["All"] + sorted(df["Party Name (Branch)"].dropna().unique().tolist())
     for idx, val in enumerate(branches_list, start=1):
         ds[f"U{idx}"] = val
@@ -407,7 +449,6 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     ws.add_data_validation(dv_br)
     dv_br.add("B8")
 
-    # Col V: Overdue Bucket Dropdown
     buckets_dd = ["All", "0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"]
     for idx, val in enumerate(buckets_dd, start=1):
         ds[f"V{idx}"] = val
@@ -421,7 +462,7 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
 
     # Chart 1 Data (W1:X5): Overdue Bucket-wise Outstanding
     ds["W1"] = "Overdue Bucket"
-    ds["X1"] = "Outstanding (₹)"
+    ds["X1"] = "Outstanding"
     for i, b_name in enumerate(["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"], start=2):
         ds[f"W{i}"] = b_name
         ds[f"X{i}"] = (
@@ -430,9 +471,9 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         )
         ds[f"X{i}"].number_format = "#,##0"
 
-    # Chart 2 Data (Y1:Z11): Top 10 Parties (Party Group) by Outstanding
+    # Chart 2 Data (Y1:Z11): Top 10 Parties (Party Group)
     ds["Y1"] = "Party Group"
-    ds["Z1"] = "Outstanding (₹)"
+    ds["Z1"] = "Outstanding"
     top10_groups = (
         df.groupby("Party Group")["Invoice Value"]
         .sum()
@@ -450,7 +491,7 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
 
     # Chart 3 Data (AA1:AB11): Top 10 Pending Branches
     ds["AA1"] = "Branch"
-    ds["AB1"] = "Outstanding (₹)"
+    ds["AB1"] = "Outstanding"
     top10_branches = (
         df.groupby("Party Name (Branch)")["Invoice Value"]
         .sum()
@@ -459,69 +500,55 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         .index.tolist()
     )
     for i, br_name in enumerate(top10_branches, start=2):
-        ds[f"AA{i}"] = br_name
+        ds[f"AA{i}"] = br_name[:28] + ("..." if len(br_name) > 28 else "")
+        ds[f"AC{i}"] = br_name  # Full name for exact SUMIFS matching
         ds[f"AB{i}"] = (
-            f'=IF(OR({sh_ref}!$B$8="All",{sh_ref}!$B$8=AA{i}),'
-            f'SUMIFS({amt_rng},{grp_rng},{c_grp_ds},{br_rng},AA{i},{bkt_rng},{c_bkt_ds}),0)'
+            f'=IF(OR({sh_ref}!$B$8="All",{sh_ref}!$B$8=AC{i}),'
+            f'SUMIFS({amt_rng},{grp_rng},{c_grp_ds},{br_rng},AC{i},{bkt_rng},{c_bkt_ds}),0)'
         )
         ds[f"AB{i}"].number_format = "#,##0"
 
-    # ---- 3 LIVE CHARTS (plot_vis_only=False so they ALWAYS render!) ----
-    # Chart 1: Overdue Bucket-wise Outstanding
-    ch1 = BarChart()
-    ch1.type = "col"
-    ch1.style = 10
-    ch1.title = "Overdue Bucket-wise Outstanding (₹)"
-    ch1.y_axis.title = "Amount (₹)"
-    ch1.legend = None
-    ch1.plot_vis_only = False
-    ch1.add_data(Reference(ds, min_col=24, min_row=1, max_row=5), titles_from_data=True)
-    ch1.set_categories(Reference(ds, min_col=23, min_row=2, max_row=5))
-    ch1.dataLabels = DataLabelList()
-    ch1.dataLabels.showVal = True
-    ch1.width = 11.5
-    ch1.height = 7.5
+    # ---- 3 CLEAN, NON-OVERLAPPING LIVE CHARTS ----
+    ch1 = make_clean_bar_chart(
+        chart_type="col",
+        title="Overdue Bucket-wise Outstanding (₹)",
+        data_ref=Reference(ds, min_col=24, min_row=1, max_row=5),
+        cats_ref=Reference(ds, min_col=23, min_row=2, max_row=5),
+        bar_hex="1F4E78",
+        width=12.0,
+        height=9.2,
+    )
     ws.add_chart(ch1, "E7")
 
-    # Chart 2: Top 10 Parties (Group) by Outstanding
     if top10_groups:
-        ch2 = BarChart()
-        ch2.type = "bar"
-        ch2.style = 12
-        ch2.title = "Top 10 Parties by Outstanding (₹)"
-        ch2.x_axis.title = "Amount (₹)"
-        ch2.legend = None
-        ch2.plot_vis_only = False
         max_r2 = 1 + len(top10_groups)
-        ch2.add_data(Reference(ds, min_col=26, min_row=1, max_row=max_r2), titles_from_data=True)
-        ch2.set_categories(Reference(ds, min_col=25, min_row=2, max_row=max_r2))
-        ch2.dataLabels = DataLabelList()
-        ch2.dataLabels.showVal = True
-        ch2.width = 12.5
-        ch2.height = 7.5
+        ch2 = make_clean_bar_chart(
+            chart_type="bar",
+            title="Top 10 Parties by Outstanding (₹)",
+            data_ref=Reference(ds, min_col=26, min_row=1, max_row=max_r2),
+            cats_ref=Reference(ds, min_col=25, min_row=2, max_row=max_r2),
+            bar_hex="0F766E",
+            width=13.5,
+            height=9.2,
+        )
         ws.add_chart(ch2, "J7")
 
-    # Chart 3: Top 10 Pending Branches
     if top10_branches:
-        ch3 = BarChart()
-        ch3.type = "bar"
-        ch3.style = 11
-        ch3.title = "Top 10 Pending Branches (₹)"
-        ch3.x_axis.title = "Amount (₹)"
-        ch3.legend = None
-        ch3.plot_vis_only = False
         max_r3 = 1 + len(top10_branches)
-        ch3.add_data(Reference(ds, min_col=28, min_row=1, max_row=max_r3), titles_from_data=True)
-        ch3.set_categories(Reference(ds, min_col=27, min_row=2, max_row=max_r3))
-        ch3.dataLabels = DataLabelList()
-        ch3.dataLabels.showVal = True
-        ch3.width = 12.5
-        ch3.height = 7.5
+        ch3 = make_clean_bar_chart(
+            chart_type="bar",
+            title="Top 10 Pending Branches (₹)",
+            data_ref=Reference(ds, min_col=28, min_row=1, max_row=max_r3),
+            cats_ref=Reference(ds, min_col=27, min_row=2, max_row=max_r3),
+            bar_hex="4338CA",
+            width=14.5,
+            height=9.2,
+        )
         ws.add_chart(ch3, "O7")
 
-    # ---- DYNAMIC FILTERED INVOICES TABLE (Row 23 onwards, Col E onwards) ----
+    # ---- DYNAMIC FILTERED INVOICES TABLE (Row 26 onwards, Col E onwards) ----
     col_start = 5   # Column E
-    start_row = 23  # Header row
+    start_row = 26  # Header row (clean gap below taller charts)
 
     for offset, col_name in enumerate(df.columns):
         c_idx = col_start + offset
@@ -533,7 +560,6 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     amt_col_offset = df.columns.get_loc("Invoice Value")
     date_col_offset = df.columns.get_loc("Invoice Date")
 
-    # Dynamic INDEX/MATCH rows — shows ONLY matching rows when B5 / B8 / B11 changes!
     for r_idx in range(1, n_rows + 1):
         excel_row = start_row + r_idx
         for offset, col_name in enumerate(df.columns):
