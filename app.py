@@ -93,6 +93,23 @@ def extract_parent_party(party_name: str) -> str:
     return " ".join(words[:2]) if len(words) > 1 and len(words[0]) <= 3 else words[0]
 
 
+def get_financial_year(dt) -> str:
+    """Indian Financial Year (1 Apr - 31 Mar) return karta hai, e.g. 2025-26."""
+    if pd.isna(dt):
+        return "Unknown"
+    yr = dt.year
+    if dt.month >= 4:
+        return f"{yr}-{str(yr + 1)[-2:]}"
+    return f"{yr - 1}-{str(yr)[-2:]}"
+
+
+def get_last_financial_year(as_on: date) -> str:
+    """As-on date ke hisaab se pichla Financial Year return karta hai."""
+    curr_start = as_on.year if as_on.month >= 4 else as_on.year - 1
+    prev_start = curr_start - 1
+    return f"{prev_start}-{str(prev_start + 1)[-2:]}"
+
+
 def get_overdue_bucket(days: int) -> str:
     if pd.isna(days):
         return "0-30 Days"
@@ -145,6 +162,7 @@ def process_register_outstanding(
 
     date_col = "Bill.Date" if (is_purchase and "Bill.Date" in out_df.columns) else "Doc.Date"
     out_df["Invoice Date"] = pd.to_datetime(out_df[date_col], errors="coerce")
+    out_df["Financial Year"] = out_df["Invoice Date"].apply(get_financial_year)
     out_df["Invoice Value"] = pd.to_numeric(out_df.get("Invoice Value", 0), errors="coerce").fillna(0.0)
 
     if (out_df["Invoice Value"] == 0).any() and "Item Value" in valid_df.columns:
@@ -163,6 +181,7 @@ def process_register_outstanding(
     keep_cols = [
         "Party Group",
         "Party Name (Branch)",
+        "Financial Year",
         "Type",
         "Serial",
         "Bill No",
@@ -253,11 +272,16 @@ def write_raw_sheet(wb: Workbook, title: str, df: pd.DataFrame):
     ws.freeze_panes = "A2"
 
 
-def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame, data_sheet_name: str):
+def write_outstanding_dashboard_sheet(
+    wb: Workbook,
+    title: str,
+    df: pd.DataFrame,
+    data_sheet_name: str,
+    last_fy: str,
+):
     ws = wb.create_sheet(title=title)
     ws.views.sheetView[0].showGridLines = False
 
-    # Hidden backend sheet for dynamic filtering + live charts
     ds = wb.create_sheet(title=data_sheet_name)
     ds.sheet_state = "hidden"
 
@@ -312,8 +336,8 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     ws.row_dimensions[1].height = 18
     ws.row_dimensions[2].height = 18
 
-    # Left Multi-Select Filter Panel Background (A1:C28)
-    for r in range(1, 29):
+    # Left Multi-Select Filter Panel Background (A1:C35)
+    for r in range(1, 36):
         for c in range(1, 4):
             ws.cell(row=r, column=c).fill = panel_fill
 
@@ -340,28 +364,26 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
             cell.border = box_border
             cell.alignment = Alignment(horizontal="left", vertical="center")
 
-    # 3 Filter Blocks with 5 Multi-Select Slots + Include/Exclude Mode each
+    # 4 Multi-Select Filter Blocks
     setup_filter_block(4, "1. Party / Company Group", [5, 6, 7, 8, 9])
     setup_filter_block(11, "2. Branch / Sub-Party", [12, 13, 14, 15, 16])
     setup_filter_block(18, "3. Overdue Days Bucket", [19, 20, 21, 22, 23])
+    setup_filter_block(25, "4. Financial Year", [26, 27, 28])
 
-    ws["B25"] = "How to use:"
-    ws["B25"].font = Font(bold=True, size=8, color="1F4E78")
-    ws["B26"] = "• 1 se zyada select karne ke liye"
-    ws["B26"].font = Font(italic=True, size=8, color="595959")
-    ws["B27"] = "  alag boxes mein options chunein."
-    ws["B27"].font = Font(italic=True, size=8, color="595959")
-    ws["B28"] = "• Deselect ke liye 'Exclude' chunein."
-    ws["B28"].font = Font(italic=True, size=8, color="595959")
+    ws["B30"] = "How to use:"
+    ws["B30"].font = Font(bold=True, size=8, color="1F4E78")
+    ws["B31"] = "• 1 se zyada select karne ke liye"
+    ws["B31"].font = Font(italic=True, size=8, color="595959")
+    ws["B32"] = "  alag boxes mein options chunein."
+    ws["B32"].font = Font(italic=True, size=8, color="595959")
+    ws["B33"] = "• Deselect ke liye 'Exclude' chunein."
+    ws["B33"].font = Font(italic=True, size=8, color="595959")
 
     if len(df) == 0:
         ws["E4"] = "Koi pending invoice nahi hai."
         return
 
     # ---- POPULATE BACKEND DATA SHEET (ds) ----
-    # Col A = Match_Flag (1 if row matches all 3 left-panel filters, else 0)
-    # Col B = Match_Counter (cumulative count for live INDEX/MATCH table)
-    # Col C onwards = df columns
     ds["A1"] = "Match_Flag"
     ds["B1"] = 0
     for idx, col_name in enumerate(df.columns, start=3):
@@ -369,6 +391,7 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
 
     grp_ds_ltr = get_column_letter(3 + df.columns.get_loc("Party Group"))
     br_ds_ltr = get_column_letter(3 + df.columns.get_loc("Party Name (Branch)"))
+    fy_ds_ltr = get_column_letter(3 + df.columns.get_loc("Financial Year"))
     amt_ds_ltr = get_column_letter(3 + df.columns.get_loc("Invoice Value"))
     days_ds_ltr = get_column_letter(3 + df.columns.get_loc("Overdue Days"))
     bkt_ds_ltr = get_column_letter(3 + df.columns.get_loc("Overdue Bucket"))
@@ -380,9 +403,6 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     r_start = 2
     r_end = n_rows + 1
 
-    # FIXED Multi-Select Formula:
-    # Agar 5 boxes mein se kisi bhi box mein actual value (non-blank & not "All") hai,
-    # toh "All" automatically ignore ho jayega aur sirf selected values filter hongi!
     for i, row in enumerate(df.itertuples(index=False, name=None), start=2):
         cond_grp = (
             f'IF(COUNTIFS({sh_ref}!$B$5:$B$9,"<>",{sh_ref}!$B$5:$B$9,"<>All")=0,TRUE,'
@@ -402,7 +422,13 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
             f'COUNTIF({sh_ref}!$B$19:$B$23,{bkt_ds_ltr}{i})=0,'
             f'COUNTIF({sh_ref}!$B$19:$B$23,{bkt_ds_ltr}{i})>0))'
         )
-        ds.cell(row=i, column=1, value=f"=IF(AND({cond_grp},{cond_br},{cond_bkt}),1,0)")
+        cond_fy = (
+            f'IF(COUNTIFS({sh_ref}!$B$26:$B$28,"<>",{sh_ref}!$B$26:$B$28,"<>All")=0,TRUE,'
+            f'IF({sh_ref}!$C$25="Exclude",'
+            f'COUNTIF({sh_ref}!$B$26:$B$28,{fy_ds_ltr}{i})=0,'
+            f'COUNTIF({sh_ref}!$B$26:$B$28,{fy_ds_ltr}{i})>0))'
+        )
+        ds.cell(row=i, column=1, value=f"=IF(AND({cond_grp},{cond_br},{cond_bkt},{cond_fy}),1,0)")
         ds.cell(row=i, column=2, value=f"=B{i-1}+A{i}")
 
         for offset, val in enumerate(row):
@@ -416,27 +442,28 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     cnt_rng = f"{ds_ref}!$B${r_start}:$B${r_end}"
     grp_rng = f"{ds_ref}!${grp_ds_ltr}${r_start}:${grp_ds_ltr}${r_end}"
     br_rng = f"{ds_ref}!${br_ds_ltr}${r_start}:${br_ds_ltr}${r_end}"
+    fy_rng = f"{ds_ref}!${fy_ds_ltr}${r_start}:${fy_ds_ltr}${r_end}"
     amt_rng = f"{ds_ref}!${amt_ds_ltr}${r_start}:${amt_ds_ltr}${r_end}"
     day_rng = f"{ds_ref}!${days_ds_ltr}${r_start}:${days_ds_ltr}${r_end}"
     bkt_rng = f"{ds_ref}!${bkt_ds_ltr}${r_start}:${bkt_ds_ltr}${r_end}"
 
-    # ---- 5 DYNAMIC KPI CARDS (Row 4-5) ----
+    # ---- 5 DYNAMIC KPI CARDS (Row 4-5) — Pending Invoices at LAST ----
     kpi_specs = [
         ("E", "F", "Total Outstanding (₹)",
          f"=SUMIF({flag_rng},1,{amt_rng})",
          "₹#,##0.00", kpi_fill, kpi_val_font),
-        ("H", "I", "Pending Invoices",
-         f"=COUNTIF({flag_rng},1)",
-         "#,##0", kpi_fill, kpi_val_font),
-        ("K", "L", "46-90 Days Overdue (₹)",
+        ("H", "I", "46-90 Days Overdue (₹)",
          f'=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},"46-90 Days")',
          "₹#,##0.00", kpi_amber_fill, kpi_amber_font),
-        ("N", "O", "90+ Days Overdue (₹)",
+        ("K", "L", "90+ Days Overdue (₹)",
          f'=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},"90+ Days")',
          "₹#,##0.00", kpi_red_fill, kpi_red_font),
-        ("Q", "R", "Avg Overdue Days",
+        ("N", "O", "Avg Overdue Days",
          f"=IFERROR(AVERAGEIF({flag_rng},1,{day_rng}),0)",
          '0" Days"', kpi_fill, kpi_val_font),
+        ("Q", "R", "Pending Invoices",
+         f"=COUNTIF({flag_rng},1)",
+         "#,##0", kpi_fill, kpi_val_font),
     ]
     ws.row_dimensions[4].height = 18
     ws.row_dimensions[5].height = 24
@@ -453,7 +480,7 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         ws[f"{c1}5"].number_format = num_fmt
         ws[f"{c1}5"].alignment = Alignment(horizontal="center", vertical="center")
 
-    # ---- DROPDOWN LISTS ON ds (Cols T, U, V, AD) ----
+    # ---- DROPDOWN LISTS ON ds (Cols T, U, V, W, X) ----
     groups_list = ["All"] + sorted(df["Party Group"].dropna().unique().tolist())
     for idx, val in enumerate(groups_list, start=1):
         ds[f"T{idx}"] = val
@@ -475,26 +502,32 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
     ws.add_data_validation(dv_bkt)
     dv_bkt.add("B19:B23")
 
-    ds["AD1"] = "Include"
-    ds["AD2"] = "Exclude"
-    dv_mode = DataValidation(type="list", formula1=f"={ds_ref}!$AD$1:$AD$2", allow_blank=False)
+    fy_list = ["All"] + sorted(df["Financial Year"].dropna().unique().tolist())
+    for idx, val in enumerate(fy_list, start=1):
+        ds[f"W{idx}"] = val
+    dv_fy = DataValidation(type="list", formula1=f"={ds_ref}!$W$1:$W${len(fy_list)}", allow_blank=True)
+    ws.add_data_validation(dv_fy)
+    dv_fy.add("B26:B28")
+
+    ds["X1"] = "Include"
+    ds["X2"] = "Exclude"
+    dv_mode = DataValidation(type="list", formula1=f"={ds_ref}!$X$1:$X$2", allow_blank=False)
     ws.add_data_validation(dv_mode)
-    dv_mode.add("C4")
-    dv_mode.add("C11")
-    dv_mode.add("C18")
+    for cell_ref in ["C4", "C11", "C18", "C25"]:
+        dv_mode.add(cell_ref)
 
-    # ---- LIVE CHART SUMMARIES ON ds ----
-    # Chart 1 Data (W1:X5): Overdue Bucket-wise Outstanding
-    ds["W1"] = "Overdue Bucket"
-    ds["X1"] = "Outstanding"
-    for i, b_name in enumerate(["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"], start=2):
-        ds[f"W{i}"] = b_name
-        ds[f"X{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},W{i})"
-        ds[f"X{i}"].number_format = "#,##0"
-
-    # Chart 2 Data (Y1:Z11): Top 10 Parties (Party Group)
-    ds["Y1"] = "Party Group"
+    # ---- LIVE CHART SUMMARIES ON ds (Cols Y to AG) ----
+    # Chart 1 (Y:Z): Overdue Bucket-wise Outstanding
+    ds["Y1"] = "Overdue Bucket"
     ds["Z1"] = "Outstanding"
+    for i, b_name in enumerate(["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"], start=2):
+        ds[f"Y{i}"] = b_name
+        ds[f"Z{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{bkt_rng},Y{i})"
+        ds[f"Z{i}"].number_format = "#,##0"
+
+    # Chart 2 (AA:AB): Top 10 Parties (Party Group)
+    ds["AA1"] = "Party Group"
+    ds["AB1"] = "Outstanding"
     top10_groups = (
         df.groupby("Party Group")["Invoice Value"]
         .sum()
@@ -503,13 +536,13 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         .index.tolist()
     )
     for i, grp_name in enumerate(top10_groups, start=2):
-        ds[f"Y{i}"] = grp_name
-        ds[f"Z{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{grp_rng},Y{i})"
-        ds[f"Z{i}"].number_format = "#,##0"
+        ds[f"AA{i}"] = grp_name
+        ds[f"AB{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{grp_rng},AA{i})"
+        ds[f"AB{i}"].number_format = "#,##0"
 
-    # Chart 3 Data (AA1:AB11): Top 10 Pending Branches
-    ds["AA1"] = "Branch"
-    ds["AB1"] = "Outstanding"
+    # Chart 3 (AC:AE): Top 10 Pending Branches
+    ds["AC1"] = "Branch"
+    ds["AD1"] = "Outstanding"
     top10_branches = (
         df.groupby("Party Name (Branch)")["Invoice Value"]
         .sum()
@@ -518,20 +551,37 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         .index.tolist()
     )
     for i, br_name in enumerate(top10_branches, start=2):
-        ds[f"AA{i}"] = br_name[:28] + ("..." if len(br_name) > 28 else "")
-        ds[f"AC{i}"] = br_name
-        ds[f"AB{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{br_rng},AC{i})"
-        ds[f"AB{i}"].number_format = "#,##0"
+        ds[f"AC{i}"] = br_name[:28] + ("..." if len(br_name) > 28 else "")
+        ds[f"AE{i}"] = br_name
+        ds[f"AD{i}"] = f"=SUMIFS({amt_rng},{flag_rng},1,{br_rng},AE{i})"
+        ds[f"AD{i}"].number_format = "#,##0"
 
-    # ---- 3 CLEAN, LIVE CHARTS ----
+    # Chart 4 (AF:AG): Last Financial Year Pending by Party
+    ds["AF1"] = "Party Group"
+    ds["AG1"] = f"FY {last_fy} Pending"
+    last_fy_df = df[df["Financial Year"] == last_fy]
+    top10_last_fy = (
+        last_fy_df.groupby("Party Group")["Invoice Value"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(10)
+        .index.tolist()
+    )
+    for i, grp_name in enumerate(top10_last_fy, start=2):
+        ds[f"AF{i}"] = grp_name
+        ds[f"AG{i}"] = f'=SUMIFS({amt_rng},{flag_rng},1,{fy_rng},"{last_fy}",{grp_rng},AF{i})'
+        ds[f"AG{i}"].number_format = "#,##0"
+
+    # ---- 4 CLEAN, LIVE CHARTS IN 2x2 GRID (1-column compact gap) ----
+    # Row 1 of Charts: E7 & K7
     ch1 = make_clean_bar_chart(
         chart_type="col",
         title="Overdue Bucket-wise Outstanding (₹)",
-        data_ref=Reference(ds, min_col=24, min_row=1, max_row=5),
-        cats_ref=Reference(ds, min_col=23, min_row=2, max_row=5),
+        data_ref=Reference(ds, min_col=26, min_row=1, max_row=5),
+        cats_ref=Reference(ds, min_col=25, min_row=2, max_row=5),
         bar_hex="1F4E78",
-        width=12.0,
-        height=9.2,
+        width=13.5,
+        height=8.8,
     )
     ws.add_chart(ch1, "E7")
 
@@ -540,30 +590,44 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
         ch2 = make_clean_bar_chart(
             chart_type="bar",
             title="Top 10 Parties by Outstanding (₹)",
-            data_ref=Reference(ds, min_col=26, min_row=1, max_row=max_r2),
-            cats_ref=Reference(ds, min_col=25, min_row=2, max_row=max_r2),
+            data_ref=Reference(ds, min_col=28, min_row=1, max_row=max_r2),
+            cats_ref=Reference(ds, min_col=27, min_row=2, max_row=max_r2),
             bar_hex="0F766E",
-            width=13.5,
-            height=9.2,
+            width=14.5,
+            height=8.8,
         )
-        ws.add_chart(ch2, "J7")
+        ws.add_chart(ch2, "K7")
 
+    # Row 2 of Charts: E25 & K25
     if top10_branches:
         max_r3 = 1 + len(top10_branches)
         ch3 = make_clean_bar_chart(
             chart_type="bar",
             title="Top 10 Pending Branches (₹)",
-            data_ref=Reference(ds, min_col=28, min_row=1, max_row=max_r3),
-            cats_ref=Reference(ds, min_col=27, min_row=2, max_row=max_r3),
+            data_ref=Reference(ds, min_col=30, min_row=1, max_row=max_r3),
+            cats_ref=Reference(ds, min_col=29, min_row=2, max_row=max_r3),
             bar_hex="4338CA",
-            width=14.5,
-            height=9.2,
+            width=13.5,
+            height=8.8,
         )
-        ws.add_chart(ch3, "O7")
+        ws.add_chart(ch3, "E25")
 
-    # ---- DYNAMIC FILTERED INVOICES TABLE (Row 26 onwards, Col E onwards) ----
+    if top10_last_fy:
+        max_r4 = 1 + len(top10_last_fy)
+        ch4 = make_clean_bar_chart(
+            chart_type="bar",
+            title=f"Last FY ({last_fy}) Pending by Party (₹)",
+            data_ref=Reference(ds, min_col=33, min_row=1, max_row=max_r4),
+            cats_ref=Reference(ds, min_col=32, min_row=2, max_row=max_r4),
+            bar_hex="B91C1C",
+            width=14.5,
+            height=8.8,
+        )
+        ws.add_chart(ch4, "K25")
+
+    # ---- DYNAMIC FILTERED INVOICES TABLE (Row 43 onwards, Col E onwards) ----
     col_start = 5
-    start_row = 26
+    start_row = 43
 
     for offset, col_name in enumerate(df.columns):
         c_idx = col_start + offset
@@ -594,7 +658,6 @@ def write_outstanding_dashboard_sheet(wb: Workbook, title: str, df: pd.DataFrame
                 cell.number_format = "dd-mmm-yyyy"
             cell.border = thin_border
 
-    # Dynamic Color Highlighting for 90+ Days (Red) & 46-90 Days (Amber)
     tbl_data_rng = f"{first_tbl_ltr}{start_row + 1}:{last_tbl_ltr}{start_row + n_rows}"
     ws.conditional_formatting.add(
         tbl_data_rng,
@@ -618,14 +681,15 @@ def build_excel_workbook(
     purchase_main: pd.DataFrame,
     sales_out: pd.DataFrame,
     purchase_out: pd.DataFrame,
+    last_fy: str,
 ) -> bytes:
     wb = Workbook()
     wb.remove(wb.active)
 
     write_raw_sheet(wb, "Sales Main Sheet", sales_main)
     write_raw_sheet(wb, "Purchase Main Sheet", purchase_main)
-    write_outstanding_dashboard_sheet(wb, "Sales Outstanding", sales_out, "_Sales_Data")
-    write_outstanding_dashboard_sheet(wb, "Purchase Outstanding", purchase_out, "_Purchase_Data")
+    write_outstanding_dashboard_sheet(wb, "Sales Outstanding", sales_out, "_Sales_Data", last_fy)
+    write_outstanding_dashboard_sheet(wb, "Purchase Outstanding", purchase_out, "_Purchase_Data", last_fy)
 
     out_buf = io.BytesIO()
     wb.save(out_buf)
@@ -635,7 +699,7 @@ def build_excel_workbook(
 
 # ---------- INTERACTIVE STREAMLIT DASHBOARD RENDERER (MULTI-SELECT) ----------
 
-def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
+def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str, last_fy: str):
     if df.empty:
         st.success(f"Koi {label} pending nahi hai!")
         return
@@ -672,7 +736,16 @@ def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
             options=bucket_options,
             default=[],
             key=f"{key_prefix}_buckets",
-            help="Ek ya zyada overdue ranges select karein (e.g. 46-90 Days + 90+ Days).",
+            help="Ek ya zyada overdue ranges select karein.",
+        )
+
+        all_fys = sorted(df["Financial Year"].dropna().unique().tolist())
+        selected_fys = st.multiselect(
+            "4. Financial Year (Khali = All)",
+            options=all_fys,
+            default=[],
+            key=f"{key_prefix}_fys",
+            help="Financial year wise (e.g. 2025-26, 2026-27) multiple selection karein.",
         )
 
     filtered = group_df.copy()
@@ -680,6 +753,8 @@ def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
         filtered = filtered[filtered["Party Name (Branch)"].isin(selected_branches)]
     if selected_buckets:
         filtered = filtered[filtered["Overdue Bucket"].isin(selected_buckets)]
+    if selected_fys:
+        filtered = filtered[filtered["Financial Year"].isin(selected_fys)]
 
     with main_col:
         total_amt = filtered["Invoice Value"].sum()
@@ -690,12 +765,13 @@ def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
 
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Total Outstanding", f"₹{total_amt:,.2f}")
-        k2.metric("Pending Invoices", f"{total_bills:,}")
-        k3.metric("46-90 Days Overdue", f"₹{amt_46_90:,.2f}")
-        k4.metric("90+ Days Overdue", f"₹{amt_90_plus:,.2f}")
-        k5.metric("Avg Overdue Days", f"{avg_days} Days")
+        k2.metric("46-90 Days Overdue", f"₹{amt_46_90:,.2f}")
+        k3.metric("90+ Days Overdue", f"₹{amt_90_plus:,.2f}")
+        k4.metric("Avg Overdue Days", f"{avg_days} Days")
+        k5.metric("Pending Invoices", f"{total_bills:,}")
 
-        c1, c2, c3 = st.columns(3)
+        # 2x2 Charts Grid
+        c1, c2 = st.columns(2)
         with c1:
             bucket_order = ["0-30 Days", "31-45 Days", "46-90 Days", "90+ Days"]
             b_sum = filtered.groupby("Overdue Bucket", as_index=False)["Invoice Value"].sum()
@@ -707,7 +783,7 @@ def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
                 b_sum,
                 x="Overdue Bucket",
                 y="Invoice Value",
-                title="Overdue Bucket-wise (₹)",
+                title="Overdue Bucket-wise Outstanding (₹)",
                 text_auto=".2s",
                 color="Overdue Bucket",
                 color_discrete_map={
@@ -734,10 +810,12 @@ def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
                 orientation="h",
                 title="Top 10 Parties by Outstanding (₹)",
                 text_auto=".2s",
+                color_discrete_sequence=["#0F766E"],
             )
             fig_g.update_layout(yaxis={"categoryorder": "total ascending"}, height=320)
             st.plotly_chart(fig_g, use_container_width=True)
 
+        c3, c4 = st.columns(2)
         with c3:
             top_br = (
                 filtered.groupby("Party Name (Branch)", as_index=False)["Invoice Value"]
@@ -752,9 +830,33 @@ def render_outstanding_tab(df: pd.DataFrame, key_prefix: str, label: str):
                 orientation="h",
                 title="Top 10 Pending Branches (₹)",
                 text_auto=".2s",
+                color_discrete_sequence=["#4338CA"],
             )
             fig_p.update_layout(yaxis={"categoryorder": "total ascending"}, height=320)
             st.plotly_chart(fig_p, use_container_width=True)
+
+        with c4:
+            last_fy_filtered = filtered[filtered["Financial Year"] == last_fy]
+            top_last_fy = (
+                last_fy_filtered.groupby("Party Group", as_index=False)["Invoice Value"]
+                .sum()
+                .sort_values("Invoice Value", ascending=False)
+                .head(10)
+            )
+            if not top_last_fy.empty:
+                fig_lfy = px.bar(
+                    top_last_fy,
+                    x="Invoice Value",
+                    y="Party Group",
+                    orientation="h",
+                    title=f"Last FY ({last_fy}) Pending by Party (₹)",
+                    text_auto=".2s",
+                    color_discrete_sequence=["#B91C1C"],
+                )
+                fig_lfy.update_layout(yaxis={"categoryorder": "total ascending"}, height=320)
+                st.plotly_chart(fig_lfy, use_container_width=True)
+            else:
+                st.info(f"Selected filters mein Last FY ({last_fy}) ka koi pending invoice nahi hai.")
 
         def highlight_overdue(row):
             if row["Overdue Bucket"] == "90+ Days":
@@ -790,6 +892,8 @@ if not (ml_file and pur_file and sal_file):
     st.info("Left sidebar mein teeno Excel files (Multi Ledger, Purchase, aur Sales) upload karein.")
     st.stop()
 
+last_fy = get_last_financial_year(as_on_date)
+
 with st.spinner("Files process ho rahi hain aur Excel Dashboards generate ho rahe hain..."):
     ml_df = read_register(ml_file.getvalue())
     pur_df = read_register(pur_file.getvalue())
@@ -800,7 +904,7 @@ with st.spinner("Files process ho rahi hain aur Excel Dashboards generate ho rah
     sales_main, sales_out = process_register_outstanding(sal_df, paid_keys, as_on_date, is_purchase=False)
     purchase_main, purchase_out = process_register_outstanding(pur_df, paid_keys, as_on_date, is_purchase=True)
 
-    excel_bytes = build_excel_workbook(sales_main, purchase_main, sales_out, purchase_out)
+    excel_bytes = build_excel_workbook(sales_main, purchase_main, sales_out, purchase_out, last_fy)
 
 st.download_button(
     label="⬇️ Download 4-Sheet Outstanding Dashboard (.xlsx)",
@@ -816,7 +920,7 @@ tab1, tab2 = st.tabs([
 ])
 
 with tab1:
-    render_outstanding_tab(sales_out, "sales", "Sales Outstanding")
+    render_outstanding_tab(sales_out, "sales", "Sales Outstanding", last_fy)
 
 with tab2:
-    render_outstanding_tab(purchase_out, "purchase", "Purchase Outstanding")
+    render_outstanding_tab(purchase_out, "purchase", "Purchase Outstanding", last_fy)
